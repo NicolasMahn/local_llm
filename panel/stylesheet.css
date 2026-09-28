@@ -1,0 +1,27 @@
+.local-llm-graph {
+  height: 2.5em;
+  min-width: 14em;
+}
+
+.local-llm-value {
+  min-width: 6em;
+  text-align: right;
+}
+
+.local-llm-detail {
+  font-size: smaller;
+  max-width: 22em;
+}
+
+/* The only colors in the extension: one per model state, from the GNOME palette. */
+.local-llm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  margin-right: 10px;
+}
+
+.local-llm-dot.off { background-color: #9a9996; }
+.local-llm-dot.changing { background-color: #f6d32d; }
+.local-llm-dot.live { background-color: #33d17a; }
+.local-llm-dot.failed { background-color: #e01b24; }

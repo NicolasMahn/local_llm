@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Start and stop the local model servers and the gateway in front of them.
+#
+#   ./llm up [name...]   start the gateway and the given models (default: all)
+#   ./llm stop <name>    stop one model
+#   ./llm down           stop everything
+#   ./llm gateway        restart the gateway, e.g. after editing gateway.py
+#   ./llm status         show which servers are up
+#   ./llm logs <name>    follow one server's log
+#   ./llm list           print each model's name and port
+#   ./llm key            print the API key clients must send
+#   ./llm monitor        install and start the power and load monitor (once)
+set -euo pipefail
+
+IMAGE=localhost/local-llm:latest
+GATEWAY_PORT=8400
+# Resolved, because the GNOME panel runs this through a symlink.
+HERE=$(dirname "$(readlink -f "$0")")
+KEY_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/local-llm/api-key
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes stats.json here
+
+# name | port | GPU memory share | Hugging Face repo | extra vLLM flags
+# The shares add up to less than 1.0 so the desktop keeps some memory.
+# Qwen3.8 mixes attention with a recurrent layer whose cache is one block per
+# concurrent request, so max-num-seqs has to stay within the memory share.
+# Sized for the GPU borrowing up to 110 GB of RAM (README): together 0.65,
+# about 72 GB, leaving the desktop the rest.
+# A single GPU call that runs for seconds keeps the desktop off the GPU, and
+# after 2 s the kernel resets it (README). Prefill steps of 512 tokens keep
+# each call short; the default 8192 crashed the desktop. Attention calls also
+# grow with the context: attention/ keeps them short for Gemma and Qwen up to
+# their full 262k. Qwen still reads slowly there (~9 s per step at 255k).
+# Long contexts are only usable when follow-ups come from the prefix cache.
+# Gemma's sliding-window layers and Qwen's recurrent layers can only resume
+# from a kept checkpoint, and vLLM keeps one only where the last request
+# ended, so a chat turn, which diverges where the last answer began, missed.
+# retention-interval keeps one every window (Gemma) or page (Qwen); they are
+# evicted like any cached block, so they cost no reserved memory.
+MODELS=(
+  "qwen3.8-27b|8001|0.30|RedHatAI/Qwen3.8-27B-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1568 --attention-backend TRITON_ATTN --max-num-seqs 32 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-auto-tool-choice"
+  "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice"
+  "qwen3-asr|8004|0.10|Qwen/Qwen3-ASR-1.7B|--max-model-len 8192 --max-num-seqs 16"
+)
+AUDIO_MODEL=qwen3-asr
+MEMORY_BUDGET=0.95 # shares of all running models together; the rest is the desktop's
+WORKING_ROOM_GB=4  # beyond the weights: compiled graphs, activations, a minimal cache
+
+field() { cut -d'|' -f"$2" <<<"$1"; }
+
+# --init puts a tiny init first in the container: as process 1, vLLM would
+# ignore the stop signal and podman would wait 10 s before killing it.
+# --restart brings a crashed model back (a GPU reset kills them all), but only
+# three times, so one that cannot start stays down with its reason.
+# The caches live on the host so compiled kernels survive container restarts.
+# Triton only keeps its kernel tuning results when asked to; without them every
+# start re-benchmarks Qwen's recurrent-layer kernels, which takes most of an hour.
+run_container() {
+  local name=$1; shift
+  mkdir -p "$HOME/.cache/llm-kernels/triton" "$HOME/.cache/llm-kernels/comgr"
+  podman run -d --replace --name "llm-$name" --init --restart on-failure:3 \
+    --network host --ipc host \
+    --device /dev/kfd --device /dev/dri --group-add keep-groups \
+    --security-opt seccomp=unconfined --security-opt label=disable \
+    -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    -v "$HOME/.cache/vllm:/root/.cache/vllm" \
+    -v "$HOME/.cache/llm-kernels/triton:/root/.triton" \
+    -v "$HOME/.cache/llm-kernels/comgr:/root/.cache/comgr" \
+    -e HF_HUB_OFFLINE=1 \
+    -e TRITON_CACHE_AUTOTUNING=1 -e TRITON_PRINT_AUTOTUNING=1 \
+    "$IMAGE" "$@" >/dev/null 9>&-
+  echo "started llm-$name"
+}
+
+api_key() {
+  if [[ ! -s $KEY_FILE ]]; then
+    mkdir -p "$(dirname "$KEY_FILE")"
+    (umask 077; echo "sk-local-$(head -c 24 /dev/urandom | base64 | tr '+/' '-_')" >"$KEY_FILE")
+  fi
+  cat "$KEY_FILE"
+}
+
+# Left alone when it already runs, so starting one model does not cut off
+# answers that are streaming from another.
+ensure_gateway() {
+  if ! running gateway; then
+    start_gateway
+  fi
+}
+
+# The gateway listens on the network; the model servers stay on localhost,
+# so every outside request has to pass the key check.
+# The whole folder is mounted, not single files: editors that save by replacing
+# a file would otherwise leave the container serving the old chat.html.
+start_gateway() {
+  local backends=() model
+  for model in "${MODELS[@]}"; do
+    backends+=("$(field "$model" 1)=http://127.0.0.1:$(field "$model" 2)")
+  done
+  local IFS=,
+  mkdir -p "$STATE_DIR"
+  podman run -d --replace --name llm-gateway --init --network host \
+    -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" --security-opt label=disable -w /app \
+    -e LLM_BACKENDS="${backends[*]}" -e LLM_AUDIO_MODEL="$AUDIO_MODEL" \
+    -e LLM_API_KEY="$(api_key)" \
+    "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
+  echo "gateway and test chat on http://$(hostname).local:$GATEWAY_PORT"
+}
+
+running() {
+  [[ $(podman inspect -f '{{.State.Running}}' "llm-$1" 2>/dev/null) == true ]]
+}
+
+# What vLLM takes the shares of, asked the way vLLM asks. Cached per boot, in
+# the runtime dir that a reboot empties, since only a reboot changes the split.
+gpu_bytes() {
+  local cache=${XDG_RUNTIME_DIR:-/tmp}/local-llm-gpu-bytes answer
+  if [[ ! -s $cache ]]; then
+    answer=$(podman run --rm --device /dev/kfd --device /dev/dri --group-add keep-groups \
+      --security-opt seccomp=unconfined --security-opt label=disable "$IMAGE" \
+      python3 -c "import torch; print(torch.cuda.mem_get_info()[1])" 2>/dev/null 9>&- | tail -1)
+    [[ $answer =~ ^[0-9]+$ ]] && echo "$answer" >"$cache"
+  fi
+  cat "$cache"
+}
+
+weights_bytes() {
+  du -sbL "$HOME/.cache/huggingface/hub/models--${1//\//--}/snapshots/"* | awk '{ sum += $1 } END { print sum }'
+}
+
+# Refuse up front instead of letting vLLM fail minutes into loading: the model's
+# weights plus room to work must fit its share, all running shares together
+# must leave the desktop its part, and when the GPU borrows its memory from RAM
+# (small VRAM in the BIOS), that RAM must actually be free.
+check_fits() {
+  local name=$1 share=$2 repo=$3 model other used=0
+  for model in "${MODELS[@]}"; do
+    other=$(field "$model" 1)
+    if [[ $other != "$name" ]] && running "$other"; then
+      used=$(awk "BEGIN { print $used + $(field "$model" 3) }")
+    fi
+  done
+  local vram free
+  vram=$(cat /sys/class/drm/card*/device/mem_info_vram_total 2>/dev/null | sort -n | tail -1)
+  free=$(awk '/^MemAvailable:/ { print $2 * 1024 }' /proc/meminfo)
+  awk -v name="$name" -v share="$share" -v used="$used" -v budget="$MEMORY_BUDGET" \
+      -v total="$(gpu_bytes)" -v weights="$(weights_bytes "$repo")" -v room="$WORKING_ROOM_GB" \
+      -v vram="${vram:-0}" -v free="$free" '
+    BEGIN {
+      gb = 1024 ^ 3
+      if (share * total < weights + room * gb) {
+        printf "%s does not fit: it needs about %.0f GB, its %.2f share is %.0f of %.0f GB\n",
+          name, weights / gb + room, share, share * total / gb, total / gb
+        exit 1
+      }
+      if (vram < 2 * gb && share * total > free - room * gb) {
+        printf "%s does not fit in RAM: its %.2f share borrows %.0f GB, only %.0f GB are free\n",
+          name, share, share * total / gb, free / gb
+        exit 1
+      }
+      if (used + share > budget) {
+        printf "%s does not fit next to the running models: they use %.2f of the GPU memory, it needs %.2f, the limit is %.2f\n",
+          name, used, share, budget
+        exit 1
+      }
+    }' >&2
+}
+
+wait_until_ready() {
+  local name=$1 port=$2
+  echo "waiting for $name (a first start compiles for up to an hour)"
+  until curl -sf "localhost:$port/health" >/dev/null; do
+    if ! running "$name"; then
+      echo "llm-$name stopped, see ./llm logs $name" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+# Models start one at a time, also across separate calls: vLLM sizes its cache
+# from the memory that is free while it starts, so a neighbour that is still
+# loading makes it see too little. Containers must not inherit the lock (9>&-),
+# or their podman monitor keeps holding it for as long as they run.
+up() {
+  local wanted=("$@") model name port
+  exec 9>"${XDG_RUNTIME_DIR:-/tmp}/local-llm.lock"
+  flock 9
+  podman image exists "$IMAGE" || podman build -t "$IMAGE" "$HERE"
+  ensure_gateway
+  for model in "${MODELS[@]}"; do
+    name=$(field "$model" 1)
+    port=$(field "$model" 2)
+    if [[ ${#wanted[@]} -gt 0 && ! " ${wanted[*]} " =~ " $name " ]]; then
+      continue
+    fi
+    running "$name" && continue
+    check_fits "$name" "$(field "$model" 3)" "$(field "$model" 4)"
+    # shellcheck disable=SC2046  # the flags column is meant to split into words
+    run_container "$name" vllm serve "$(field "$model" 4)" \
+      --served-model-name "$name" \
+      --host 127.0.0.1 --port "$port" \
+      --gpu-memory-utilization "$(field "$model" 3)" \
+      $(field "$model" 5)
+    wait_until_ready "$name" "$port"
+  done
+}
+
+# A user service, so it measures from login on whether or not models run.
+install_monitor() {
+  local unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/local-llm-monitor.service
+  mkdir -p "$(dirname "$unit")"
+  cat >"$unit" <<UNIT
+[Unit]
+Description=Local LLM monitor: power, energy cost and model load
+
+[Service]
+ExecStart=/usr/bin/python3 $HERE/monitor.py
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable local-llm-monitor.service
+  systemctl --user restart local-llm-monitor.service
+}
+
+down() {
+  podman ps -a --format '{{.Names}}' | grep '^llm-' | xargs -r podman rm -f
+}
+
+# Everything runs from main, called on the last line: bash reads a script while
+# running it, so without this, editing llm during a long `up` would make the
+# running copy read the new file at the wrong place.
+main() {
+  case "${1:-}" in
+    up) shift; up "$@" ;;
+    stop) podman rm -f --ignore "llm-$2" >/dev/null ;;
+    down) down ;;
+    gateway) start_gateway ;;
+    status)
+      curl -s "localhost:$GATEWAY_PORT/health" && echo || echo "gateway is down"
+      python3 - "$STATE_DIR/stats.json" <<'PY'
+import json, sys, time
+from datetime import datetime
+try:
+    stats = json.load(open(sys.argv[1]))
+    fresh = time.time() - datetime.fromisoformat(stats["updated"]).timestamp() < 15
+except (OSError, ValueError, KeyError):
+    fresh = False
+if not fresh:
+    print("monitor is not running, so problems are not checked (./llm monitor)")
+for problem in stats.get("problems", []) if fresh else []:
+    print(f"{problem['severity']}: {problem['message']}")
+PY
+      ;;
+    logs) podman logs -f "llm-$2" ;;
+    list) for model in "${MODELS[@]}"; do echo "$(field "$model" 1) $(field "$model" 2)"; done ;;
+    key) api_key ;;
+    monitor) install_monitor ;;
+    *) sed -n '2,13p' "$0"; exit 1 ;;
+  esac
+}
+
+main "$@"; exit

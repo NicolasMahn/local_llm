@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Local LLM</title>
+<style>
+  /* The palette, in one place; everything below refers to these names. */
+  :root {
+    color-scheme: light dark;
+    --background: #fafafb;
+    --surface: #f0f0f3;
+    --border: #e0e0e5;
+    --text: #1d1d21;
+    --muted: #6b6b73;
+    --accent: #3584e4;
+    --on-accent: #ffffff;
+    --error: #c01c28;
+    --warning: #9c6e03;
+    --user-bubble: color-mix(in srgb, var(--accent) 14%, var(--surface));
+    --code: color-mix(in srgb, var(--text) 6%, var(--background));
+    --chart: #3584e4; /* data marks; checked for contrast against --background */
+    --chart-wash: color-mix(in srgb, var(--chart) 12%, transparent);
+    /* Power parts, in fixed order; checked for colorblind separation in both modes. */
+    --part-gpu: #2a78d6;
+    --part-cpu: #eb6834;
+    --part-rest: #1baf7a;
+
+    --radius: 14px;
+    --column: 46rem;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #19191c;
+      --surface: #25252a;
+      --border: #323238;
+      --text: #ececf0;
+      --muted: #96969e;
+      --accent: #78aeed;
+      --on-accent: #10233b;
+      --error: #ff7b63;
+      --warning: #f8c34a;
+      --chart: #4f8fe0;
+      --part-gpu: #3987e5;
+      --part-cpu: #d95926;
+      --part-rest: #199e70;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; flex-direction: column;
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--background); color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
+        stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  [hidden] { display: none !important; }
+
+  .column { width: 100%; max-width: var(--column); margin: 0 auto; padding: 0 16px; }
+
+  header {
+    position: sticky; top: 0; z-index: 1;
+    background: color-mix(in srgb, var(--background) 85%, transparent);
+    backdrop-filter: blur(12px);
+    padding-top: env(safe-area-inset-top);
+  }
+  header .column { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+
+  .picker { position: relative; display: inline-flex; align-items: center; }
+  .picker select {
+    appearance: none; border: none; background: transparent;
+    font-weight: 600; padding: 6px 30px 6px 10px; margin-left: -10px;
+    border-radius: 10px;
+  }
+  .picker select:hover, .picker select:focus-visible { background: var(--surface); outline: none; }
+  .picker svg { position: absolute; right: 8px; width: 16px; height: 16px; pointer-events: none; color: var(--muted); }
+
+  .icon-button {
+    display: grid; place-items: center; width: 38px; height: 38px;
+    border: none; border-radius: 50%; background: transparent; color: var(--muted);
+  }
+  .icon-button:hover, .icon-button:focus-visible { background: var(--surface); color: var(--text); outline: none; }
+
+  .actions { display: flex; gap: 4px; }
+  .icon-button.active { background: var(--surface); color: var(--text); }
+
+  main { flex: 1; overflow-y: auto; }
+
+  /* Measurements: headline numbers, then one chart per measure. */
+  #stats { display: flex; flex-direction: column; gap: 28px; padding-top: 12px; padding-bottom: 24px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 8px; }
+  .tile { background: var(--surface); border-radius: var(--radius); padding: 12px 14px; }
+  .tile span { display: block; color: var(--muted); font-size: 13px; }
+  .tile strong { display: block; font-size: 24px; font-weight: 600; white-space: nowrap; }
+  #charts { display: grid; gap: 28px; }
+  .chart { position: relative; }
+  .chart-head { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 6px; }
+  .chart-head span:first-child { color: var(--muted); }
+  .chart-head span:last-child { font-weight: 600; }
+  .chart svg { display: block; width: 100%; height: 132px; overflow: visible; stroke: none; }
+  .chart .grid { stroke: var(--border); stroke-width: 1; }
+  .chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .chart .area { fill: var(--chart-wash); }
+  .chart .line { fill: none; stroke: var(--chart); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .end { fill: var(--chart); stroke: var(--background); stroke-width: 2; }
+  .chart .crosshair { stroke: var(--muted); stroke-width: 1; }
+  .chart .band { fill-opacity: 0.6; }
+  .chart .gap { fill: none; stroke: var(--background); stroke-width: 2; }
+  .chart .total { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linejoin: round; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; margin: -2px 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; }
+  .legend b { font-weight: 600; }
+  .tooltip div { display: flex; align-items: center; gap: 6px; }
+  .tooltip i { width: 10px; height: 2px; }
+  .tooltip {
+    position: absolute; top: 24px; pointer-events: none; white-space: nowrap;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 4px 8px; font-size: 13px;
+  }
+  .tooltip span { color: var(--muted); margin-left: 6px; }
+  #stats-note { color: var(--muted); font-size: 13px; margin: 0; }
+  #problems { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+  #problems li { display: flex; gap: 10px; align-items: baseline; font-size: 14px; }
+  #problems li::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  #problems .error::before { background: var(--error); }
+  #problems .warning::before { background: var(--warning); }
+  #stats-button { position: relative; }
+  #stats-button.warning::after, #stats-button.error::after {
+    content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%;
+  }
+  #stats-button.warning::after { background: var(--warning); }
+  #stats-button.error::after { background: var(--error); }
+  #messages { display: flex; flex-direction: column; gap: 20px; padding-top: 12px; padding-bottom: 24px; }
+
+  /* Empty state: the way in (key) and the way out (API addresses). */
+  #welcome { display: flex; flex-direction: column; justify-content: center; gap: 16px; min-height: 100%; padding-top: 24px; padding-bottom: 24px; }
+  .card { background: var(--surface); border-radius: var(--radius); padding: 6px; }
+  .endpoint { display: grid; grid-template-columns: 5.5rem 1fr auto; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; }
+  .endpoint + .endpoint { border-top: 1px solid var(--border); }
+  .endpoint span { color: var(--muted); font-size: 14px; }
+  .endpoint code { font: 14px var(--mono); overflow-wrap: anywhere; }
+  @media (max-width: 480px) {
+    .endpoint { grid-template-columns: 1fr auto; row-gap: 0; }
+    .endpoint span { font-size: 13px; }
+    .endpoint code { grid-row: 2; }
+    .endpoint button { grid-column: 2; grid-row: 1 / 3; }
+  }
+  #key-form { display: flex; gap: 8px; padding: 6px; }
+  #key-form input { flex: 1; min-width: 0; border: none; background: transparent; padding: 8px 10px; outline: none; font-family: var(--mono); font-size: 14px; }
+  #key-form.rejected { box-shadow: inset 0 0 0 1px var(--error); }
+  #key-error { color: var(--error); font-size: 14px; margin: -8px 0 0 12px; }
+  #key-form button, .send {
+    border: none; border-radius: 10px; background: var(--accent); color: var(--on-accent);
+    padding: 8px 16px; font-weight: 600;
+  }
+
+  .user {
+    align-self: flex-end; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere;
+    background: var(--user-bubble); border-radius: var(--radius) var(--radius) 4px var(--radius);
+    padding: 10px 14px;
+  }
+  .reply { overflow-wrap: anywhere; }
+  .reply > :first-child { margin-top: 0; }
+  .reply > :last-child { margin-bottom: 0; }
+  .reply p, .reply ul, .reply ol, .reply pre { margin: 0 0 12px; }
+  .reply ul, .reply ol { padding-left: 1.4em; }
+  .reply li + li { margin-top: 4px; }
+  .reply .heading { font-weight: 650; }
+  .reply code { font: 0.88em var(--mono); background: var(--code); padding: 2px 5px; border-radius: 6px; }
+  .reply pre { background: var(--code); border-radius: 10px; padding: 12px 14px; overflow-x: auto; }
+  .reply pre code { background: none; padding: 0; font-size: 14px; line-height: 1.5; }
+  .reply.error { color: var(--error); }
+
+  .status { color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+  .dots { display: inline-flex; gap: 4px; }
+  .dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.2s infinite ease-in-out; }
+  .dots i:nth-child(2) { animation-delay: 0.15s; }
+  .dots i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes pulse { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: 0.6; } }
+
+  footer { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  #composer {
+    display: flex; align-items: flex-end; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 22px;
+    padding: 6px 6px 6px 16px;
+  }
+  #composer:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+  #prompt {
+    flex: 1; resize: none; border: none; background: transparent; outline: none;
+    padding: 7px 0; max-height: 12rem; line-height: 1.5;
+  }
+  .send { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; }
+  #composer .icon-button { width: 36px; height: 36px; flex: none; }
+  #composer:has(.icon-button:not([hidden])) { padding-left: 6px; }
+  .icon-button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
+
+  /* Attachments: waiting above the message field, and inside sent messages. */
+  #pending { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .chip { position: relative; width: 56px; height: 56px; border-radius: 10px; overflow: hidden; background: var(--surface); }
+  .chip img, .chip video { width: 100%; height: 100%; object-fit: cover; }
+  .chip button {
+    position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; padding: 0;
+    display: grid; place-items: center; border: none; border-radius: 50%;
+    background: color-mix(in srgb, var(--background) 80%, transparent); color: var(--text);
+  }
+  .chip button svg { width: 12px; height: 12px; }
+  .user .media { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .user .media img, .user .media video { max-height: 160px; max-width: 100%; border-radius: 10px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    max-width: min(90vw, 30rem); padding: 8px 14px; border-radius: 12px; font-size: 14px;
+    background: var(--text); color: var(--background);
+  }
+  .send:disabled { background: var(--border); color: var(--muted); cursor: default; }
+</style>
+</head>
+<body>
+<header>
+  <div class="column">
+    <label class="picker" hidden>
+      <select id="model" aria-label="Model"></select>
+      <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+    </label>
+    <div class="actions">
+      <button id="stats-button" class="icon-button" title="Power and load" aria-label="Power and load" hidden>
+        <svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 16v-5"/><path d="M11 16V6"/><path d="M16 16v-8"/></svg>
+      </button>
+      <button id="new-chat" class="icon-button" title="New chat" aria-label="New chat" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="scroller">
+  <div class="column" id="welcome">
+    <form id="key-form" class="card">
+      <input id="key" type="password" placeholder="API key, from ./llm key" autocomplete="off" aria-label="API key">
+      <button>Save</button>
+    </form>
+    <p id="key-error" hidden>This key was not accepted.</p>
+    <div class="card" id="endpoints"></div>
+  </div>
+  <div class="column" id="messages" hidden></div>
+  <div class="column" id="stats" hidden>
+    <ul id="problems" hidden></ul>
+    <div class="tiles" id="tiles"></div>
+    <div id="charts"></div>
+    <p id="stats-note"></p>
+  </div>
+</main>
+
+<footer>
+  <div class="column">
+    <div id="pending" hidden></div>
+    <form id="composer">
+      <button type="button" id="attach" class="icon-button" title="Attach a picture or video" aria-label="Attach">
+        <svg viewBox="0 0 24 24"><path d="m21 12-8.6 8.6a5 5 0 0 1-7-7l8.5-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.3-2.4l7.9-7.9"/></svg>
+      </button>
+      <button type="button" id="mic" class="icon-button" title="Dictate" aria-label="Dictate" hidden>
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+      </button>
+      <button type="button" id="talk" class="icon-button" title="Let's talk" aria-label="Let's talk" hidden>
+        <svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg>
+      </button>
+      <input type="file" id="file" multiple hidden
+             accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm">
+      <textarea id="prompt" rows="1" placeholder="Message" aria-label="Message"></textarea>
+      <button id="send" class="send" aria-label="Send" disabled></button>
+    </form>
+  </div>
+</footer>
+
+<div id="toast" role="status" hidden></div>
+
+<template id="icons">
+  <svg data-name="send" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+  <svg data-name="stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/></svg>
+  <svg data-name="copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+  <svg data-name="done" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></svg>
+  <svg data-name="close" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+</template>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const icon = name => $("icons").content.querySelector(`[data-name=${name}]`).cloneNode(true);
+  const AUDIO_MODEL = "qwen3-asr";
+  // Only these models can look at pictures and videos (vLLM loads their vision part).
+  const VISION_MODELS = ["gemma-4-26b"];
+  // The formats Gemma was tested with; everything else is turned away.
+  const MEDIA_TYPES = {
+    "image/png": "image", "image/jpeg": "image", "image/webp": "image", "image/gif": "image",
+    "video/mp4": "video", "video/webm": "video",
+  };
+  const LARGEST_ATTACHMENT = 50 * 1024 ** 2;
+  let pending = []; // attachments for the next message: {kind, name, url}
+
+  // A link like /?api=sk-… (the panel copies one) saves the key, then drops it
+  // from the address bar so it does not linger on screen.
+  const keyFromLink = new URLSearchParams(location.search).get("api");
+  if (keyFromLink) {
+    localStorage.setItem("llm-key", keyFromLink);
+    window.history.replaceState(null, "", location.pathname);
+  }
+
+  // Kept in this browser only; the page itself is public on the network.
+  let key = localStorage.getItem("llm-key") || "";
+  let turns = [];
+  let streaming = null; // AbortController of the reply being received
+
+  // --- Replies: a small Markdown subset, escaped first so model output can't inject HTML.
+
+  const escape = text => text.replace(/[&<>"']/g, c =>
+    ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[c]);
+
+  const inline = text => escape(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*(?!\s)(.+?)\*(?!\w)/g, "$1<em>$2</em>");
+
+  function blocks(text) {
+    const html = [];
+    let paragraph = [], list = null;
+    const endParagraph = () => {
+      if (paragraph.length) html.push(`<p>${paragraph.map(inline).join("<br>")}</p>`);
+      paragraph = [];
+    };
+    const endList = () => { if (list) html.push(`</${list}>`); list = null; };
+
+    for (const line of text.split("\n")) {
+      const item = line.match(/^\s*(?:([-*+])|\d+[.)])\s+(.*)$/);
+      const heading = line.match(/^#{1,6}\s+(.*)$/);
+      if (item) {
+        endParagraph();
+        const tag = item[1] ? "ul" : "ol";
+        if (list !== tag) { endList(); html.push(`<${tag}>`); list = tag; }
+        html.push(`<li>${inline(item[2])}</li>`);
+      } else if (heading) {
+        endParagraph(); endList();
+        html.push(`<p class="heading">${inline(heading[1])}</p>`);
+      } else if (!line.trim()) {
+        endParagraph(); endList();
+      } else {
+        endList();
+        paragraph.push(line);
+      }
+    }
+    endParagraph(); endList();
+    return html.join("");
+  }
+
+  // Every other part of a ``` split is code; an unclosed fence while streaming is code too.
+  const markdown = text => text.split("```").map((part, index) => index % 2
+    ? `<pre><code>${escape(part.replace(/^[^\n]*\n/, ""))}</code></pre>`
+    : blocks(part)).join("");
+
+  // --- Page state
+
+  function nearBottom() {
+    const s = $("scroller");
+    return s.scrollHeight - s.scrollTop - s.clientHeight < 120;
+  }
+  const toBottom = () => { $("scroller").scrollTop = $("scroller").scrollHeight; };
+
+  // The key box only shows until a key works; a rejected key brings it back.
+  function showWelcome(needsKey) {
+    $("welcome").hidden = false;
+    $("messages").hidden = true;
+    $("new-chat").hidden = true;
+    $("key-form").hidden = !needsKey;
+    showEndpoints(!needsKey);
+    $("key").value = key;
+    const rejected = needsKey && Boolean(key);
+    $("key-form").classList.toggle("rejected", rejected);
+    $("key-error").hidden = !rejected;
+    $("composer").parentElement.hidden = needsKey;
+    $("model").parentElement.hidden = needsKey;
+    $("stats-button").hidden = needsKey;
+    (needsKey ? $("key") : $("prompt")).focus();
+  }
+
+  // Everything a client needs; the key joins the addresses once it is known to work.
+  function showEndpoints(withKey) {
+    const rows = [
+      ["OpenAI", `${location.origin}/v1`],
+      ["Anthropic", location.origin],
+      ...(withKey ? [["Key", key, `${key.slice(0, 12)}…`]] : []),
+    ];
+    $("endpoints").replaceChildren(...rows.map(([name, value, shown = value]) => {
+      const row = document.createElement("div");
+      row.className = "endpoint";
+      const label = Object.assign(document.createElement("span"), {textContent: name});
+      const text = Object.assign(document.createElement("code"), {textContent: shown});
+      const button = document.createElement("button");
+      button.className = "icon-button";
+      button.title = button.ariaLabel = `Copy ${name}`;
+      button.append(icon("copy"));
+      button.onclick = async () => {
+        await copy(value);
+        button.replaceChildren(icon("done"));
+        setTimeout(() => button.replaceChildren(icon("copy")), 1500);
+      };
+      row.append(label, text, button);
+      return row;
+    }));
+  }
+
+  // navigator.clipboard only exists on HTTPS or localhost; this page is plain HTTP.
+  async function copy(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const area = Object.assign(document.createElement("textarea"), {value: text});
+      document.body.append(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+  }
+
+  async function loadModels() {
+    const response = await fetch("/v1/models", {headers: {authorization: `Bearer ${key}`}});
+    if (response.status === 401) return showWelcome(true);
+    const running = (await response.json()).data.map(m => m.id);
+    const names = running.filter(n => n !== AUDIO_MODEL);
+    const speech = running.includes(AUDIO_MODEL);
+    $("mic").hidden = !speech && !dictation;
+    $("talk").hidden = !speech && !talking;
+    const select = $("model");
+    select.replaceChildren(...(names.length ? names : ["no models running"]).map(n => new Option(n)));
+    select.disabled = !names.length;
+    const last = localStorage.getItem("llm-model");
+    if (names.includes(last)) select.value = last;
+    if (!turns.length) showWelcome(false);
+    updateSend();
+    checkProblems();
+  }
+
+  function updateSend() {
+    const send = $("send");
+    send.replaceChildren(icon(streaming ? "stop" : "send"));
+    send.ariaLabel = streaming ? "Stop" : "Send";
+    send.disabled = !streaming && ((!$("prompt").value.trim() && !pending.length) || $("model").disabled);
+  }
+
+  function addMessage(className) {
+    $("welcome").hidden = true;
+    $("messages").hidden = false;
+    $("new-chat").hidden = false;
+    const element = document.createElement("div");
+    element.className = className;
+    $("messages").append(element);
+    toBottom();
+    return element;
+  }
+
+  function showStatus(element, text) {
+    element.innerHTML = `<span class="status">${text}<span class="dots"><i></i><i></i><i></i></span></span>`;
+  }
+
+  // The words of a message, whose content is a string or a list of parts.
+  const plainText = content => typeof content === "string" ? content
+    : content.filter(part => part.type === "text").map(part => part.text).join(" ");
+
+  // The conversation as a model can take it: pictures and videos only for vision models.
+  const forModel = (model, messages) => VISION_MODELS.includes(model) ? messages
+    : messages.map(message => typeof message.content === "string" ? message : {
+        ...message, content: `${plainText(message.content)} [an attachment only a vision model can see]`,
+      });
+
+  async function send(text) {
+    const model = $("model").value;
+    if (pending.length && !VISION_MODELS.includes(model)) {
+      toast(`${model} cannot see attachments; pick ${VISION_MODELS.join(", ")}`);
+      return null;
+    }
+    const content = !pending.length ? text : [
+      ...(text ? [{type: "text", text}] : []),
+      ...pending.map(({kind, url}) => ({type: `${kind}_url`, [`${kind}_url`]: {url}})),
+    ];
+    const bubble = addMessage("user");
+    if (pending.length) {
+      const media = Object.assign(document.createElement("div"), {className: "media"});
+      media.append(...pending.map(mediaElement));
+      bubble.append(media);
+    }
+    bubble.append(text);
+    pending = [];
+    renderPending();
+
+    // Held locally: "New chat" swaps in fresh turns while this may still stream.
+    const conversation = turns;
+    conversation.push({role: "user", content});
+    const reply = addMessage("reply");
+    showStatus(reply, "");
+    let answer = "", thinking = false;
+    streaming = new AbortController();
+    updateSend();
+
+    try {
+      const response = await fetch("/v1/chat/completions", {
+        method: "POST",
+        signal: streaming.signal,
+        headers: {"content-type": "application/json", authorization: `Bearer ${key}`},
+        body: JSON.stringify({model, messages: forModel(model, conversation), stream: true}),
+      });
+      if (response.status === 401) showWelcome(true);
+      if (!response.ok) throw new Error((await response.json()).error?.message ?? response.statusText);
+
+      // Server-sent events: "data: {json}" lines, possibly split across chunks.
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      for (;;) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buffer += value;
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        const follow = nearBottom();
+        for (const line of lines) {
+          if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+          const delta = JSON.parse(line.slice(6)).choices[0].delta;
+          if (delta.content) {
+            answer += delta.content;
+            // Qwen leaves blank lines between its thinking and the answer.
+            reply.innerHTML = markdown(answer.trimStart());
+          } else if (!answer && delta.reasoning && !thinking) {
+            thinking = true;
+            showStatus(reply, "Thinking");
+          }
+        }
+        if (follow) toBottom();
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        reply.classList.add("error");
+        reply.textContent = `Could not reach ${model}: ${error.message}`;
+      } else if (!answer) {
+        reply.remove();
+      }
+    }
+    if (answer) conversation.push({role: "assistant", content: answer});
+    else conversation.pop();
+    streaming = null;
+    updateSend();
+    return answer.trimStart() || null;
+  }
+
+  // --- Attachments
+
+  function toast(text) {
+    const box = $("toast");
+    box.textContent = text;
+    box.hidden = false;
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => { box.hidden = true; }, 3000);
+  }
+
+  function mediaElement({kind, url, name}) {
+    const element = document.createElement(kind === "video" ? "video" : "img");
+    Object.assign(element, {src: url, title: name, alt: name});
+    if (kind === "video") Object.assign(element, {muted: true, controls: true, preload: "metadata"});
+    return element;
+  }
+
+  function renderPending() {
+    $("pending").hidden = !pending.length;
+    $("pending").replaceChildren(...pending.map(attachment => {
+      const chip = Object.assign(document.createElement("div"), {className: "chip"});
+      const remove = Object.assign(document.createElement("button"),
+        {type: "button", title: "Remove", ariaLabel: `Remove ${attachment.name}`});
+      remove.append(icon("close"));
+      remove.onclick = () => { pending = pending.filter(a => a !== attachment); renderPending(); updateSend(); };
+      chip.append(mediaElement(attachment), remove);
+      return chip;
+    }));
+  }
+
+  const readAsDataUrl = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+
+  async function addFiles(files) {
+    for (const file of files) {
+      if (!MEDIA_TYPES[file.type]) {
+        toast(`${file.name}: only PNG, JPEG, WebP, GIF, MP4 or WebM`);
+      } else if (file.size > LARGEST_ATTACHMENT) {
+        toast(`${file.name} is larger than ${LARGEST_ATTACHMENT / 1024 ** 2} MB`);
+      } else {
+        pending.push({kind: MEDIA_TYPES[file.type], name: file.name, url: await readAsDataUrl(file)});
+      }
+    }
+    renderPending();
+    updateSend();
+  }
+
+  // --- Speech: dictation, and "let's talk" (listen, answer, read aloud, listen again)
+
+  let dictation = null; // the MediaRecorder while dictating
+  let talking = null; // {stopped} while talking
+
+  // Browsers only hand out the microphone on https:// or localhost pages.
+  function microphoneAllowed() {
+    if (navigator.mediaDevices?.getUserMedia) return true;
+    toast("The browser only allows the microphone on https:// or localhost pages");
+    return false;
+  }
+
+  async function transcribe(blob) {
+    const form = new FormData();
+    form.append("model", AUDIO_MODEL);
+    form.append("file", blob, "speech.webm");
+    const response = await fetch("/v1/audio/transcriptions",
+      {method: "POST", headers: {authorization: `Bearer ${key}`}, body: form});
+    if (!response.ok) throw new Error((await response.json()).error?.message ?? response.statusText);
+    return (await response.json()).text.trim();
+  }
+
+  async function toggleDictation() {
+    if (dictation) return dictation.stop();
+    if (!microphoneAllowed()) return;
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const chunks = [];
+    dictation = new MediaRecorder(stream);
+    dictation.ondataavailable = event => chunks.push(event.data);
+    dictation.onstop = async () => {
+      stream.getTracks().forEach(track => track.stop());
+      const type = dictation.mimeType;
+      dictation = null;
+      $("mic").classList.remove("on");
+      $("prompt").placeholder = "Transcribing…";
+      try {
+        const text = await transcribe(new Blob(chunks, {type}));
+        $("prompt").value = `${$("prompt").value} ${text}`.trim();
+        $("prompt").dispatchEvent(new Event("input"));
+      } catch (error) {
+        toast(`Speech failed: ${error.message}`);
+      }
+      $("prompt").placeholder = "Message";
+      $("prompt").focus();
+    };
+    dictation.start();
+    $("mic").classList.add("on");
+  }
+
+  // Records one thing said: waits for speech, ends after 1.2 s of quiet. The
+  // first half second only measures the room, so speech means clearly louder.
+  function listenOnce(stream, analyser, state) {
+    return new Promise(resolve => {
+      const recorder = new MediaRecorder(stream);
+      const chunks = [], samples = new Float32Array(analyser.fftSize), levels = [];
+      let noise = null, heard = false, quiet = 0, waited = 0, spoken = 0, restart = false;
+      recorder.ondataavailable = event => chunks.push(event.data);
+      recorder.onstop = () => {
+        clearInterval(timer);
+        if (restart) return resolve(listenOnce(stream, analyser, state));
+        resolve(state.stopped || !heard ? null : new Blob(chunks, {type: recorder.mimeType}));
+      };
+      const timer = setInterval(() => {
+        if (state.stopped) return recorder.stop();
+        analyser.getFloatTimeDomainData(samples);
+        const level = Math.sqrt(samples.reduce((sum, s) => sum + s * s, 0) / samples.length);
+        if (noise === null) {
+          levels.push(level);
+          if (levels.length >= 5) noise = levels.sort((a, b) => a - b)[2];
+          return;
+        }
+        const loud = level > Math.max(3 * noise, 0.01);
+        if (!heard) {
+          heard = loud;
+          // Long silence: start a fresh recording rather than keep it all.
+          if (!heard && (waited += 0.1) > 20) { restart = true; recorder.stop(); }
+          return;
+        }
+        quiet = loud ? 0 : quiet + 0.1;
+        if (quiet >= 1.2 || (spoken += 0.1) >= 30) recorder.stop();
+      }, 100);
+      recorder.start(100);
+    });
+  }
+
+  // Reply text without the Markdown symbols a voice would read out.
+  const speakable = text => text.replace(/```[\s\S]*?```/g, " (code omitted) ").replace(/[*_`#>|]+/g, "").trim();
+
+  const speak = text => new Promise(resolve => {
+    const utterance = new SpeechSynthesisUtterance(speakable(text));
+    utterance.onend = utterance.onerror = resolve;
+    speechSynthesis.speak(utterance);
+  });
+
+  async function toggleTalk() {
+    if (talking) {
+      talking.stopped = true;
+      speechSynthesis.cancel();
+      return;
+    }
+    if (!microphoneAllowed()) return;
+    const state = talking = {stopped: false};
+    $("talk").classList.add("on");
+    let stream, context;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      context = new AudioContext();
+      const analyser = context.createAnalyser();
+      context.createMediaStreamSource(stream).connect(analyser);
+      while (!state.stopped) {
+        $("prompt").placeholder = "Listening…";
+        const blob = await listenOnce(stream, analyser, state);
+        if (!blob) break;
+        $("prompt").placeholder = "Transcribing…";
+        const text = await transcribe(blob);
+        if (!text || state.stopped) continue;
+        $("prompt").placeholder = "Thinking…";
+        const answer = await send(text);
+        if (!answer || state.stopped) break;
+        $("prompt").placeholder = "Speaking…";
+        await speak(answer);
+      }
+    } catch (error) {
+      toast(`Let's talk stopped: ${error.message}`);
+    } finally {
+      stream?.getTracks().forEach(track => track.stop());
+      context?.close();
+      talking = null;
+      $("talk").classList.remove("on");
+      $("prompt").placeholder = "Message";
+    }
+  }
+
+  // --- Measurements: what monitor.py samples, fetched while this view is open.
+
+  const CHARTS = [
+    // Charts with parts stack them bottom up; `now` reads a part's current value,
+    // null when the monitor could not split this time.
+    {key: "power_w", title: "Power", unit: "W", parts: [
+      {key: "gpu_w", label: "GPU", color: "--part-gpu", now: s => s.power_parts_w?.gpu},
+      {key: "cpu_w", label: "CPU cores", color: "--part-cpu", now: s => s.power_parts_w?.cpu},
+      {key: "rest_w", label: "Rest of chip (RAM)", color: "--part-rest", now: s => s.power_parts_w?.rest},
+    ]},
+    {key: "memory", title: "Memory", unit: "GB", total: s => s.all_memory.total_gb, parts: [
+      {key: "mem_gpu_gb", label: "GPU (models)", color: "--part-gpu", now: s => s.all_memory.gpu_gb},
+      {key: "mem_other_gb", label: "Everything else", color: "--part-cpu", now: s => s.all_memory.other_gb},
+    ]},
+    {key: "tokens_per_second", title: "Tokens per second", unit: "tok/s"},
+    {key: "requests", title: "Requests", unit: ""},
+    {key: "gpu_busy", title: "GPU load", unit: "%", ceiling: 100},
+  ];
+  const hover = {}; // chart key -> pointer x, so a refresh keeps the crosshair
+  let lastStats = null;
+  let statsTimer = null;
+
+  function toggleStats() {
+    const open = $("stats").hidden;
+    $("stats").hidden = !open;
+    $("stats-button").classList.toggle("active", open);
+    $("composer").parentElement.hidden = open;
+    if (open) {
+      $("welcome").hidden = $("messages").hidden = true;
+      loadStats();
+      statsTimer = setInterval(loadStats, 2000);
+    } else {
+      clearInterval(statsTimer);
+      if (turns.length) $("messages").hidden = false;
+      else showWelcome(false);
+    }
+  }
+
+  async function loadStats() {
+    try {
+      const response = await fetch("/stats", {headers: {authorization: `Bearer ${key}`}});
+      if (!response.ok) throw new Error((await response.json()).error?.message ?? response.statusText);
+      lastStats = await response.json();
+      renderStats(lastStats);
+    } catch (error) {
+      $("stats-note").textContent = error.message;
+    }
+  }
+
+  const euros = new Intl.NumberFormat(undefined, {style: "currency", currency: "EUR"});
+  // Small amounts read better in Wh and cents than as 0.00 kWh and 0.00 €.
+  const energy = kwh => kwh < 1 ? `${(kwh * 1000).toFixed(kwh < 0.01 ? 1 : 0)} Wh` : `${kwh.toFixed(2)} kWh`;
+  const cost = eur => eur < 1 ? `${(eur * 100).toFixed(eur < 0.01 ? 2 : 1)} ct` : euros.format(eur);
+
+  function showProblems(problems) {
+    // The dot takes the colour of the worst problem.
+    const worst = problems.some(p => p.severity === "error") ? "error" : problems.length ? "warning" : null;
+    $("stats-button").classList.remove("warning", "error");
+    if (worst) $("stats-button").classList.add(worst);
+    $("stats-button").title = problems.length ? `Power and load: ${problems.length} problem(s)` : "Power and load";
+    $("problems").hidden = !problems.length;
+    $("problems").replaceChildren(...problems.map(problem =>
+      Object.assign(document.createElement("li"), {className: problem.severity, textContent: problem.message})));
+  }
+
+  // Problems are worth knowing about without opening the view, so check now and then.
+  async function checkProblems() {
+    if (!key || !$("stats").hidden) return;
+    try {
+      const response = await fetch("/stats", {headers: {authorization: `Bearer ${key}`}});
+      if (response.ok) showProblems((await response.json()).problems ?? []);
+    } catch {
+      // The next check will try again.
+    }
+  }
+  setInterval(checkProblems, 15000);
+
+  function renderStats(s) {
+    showProblems(s.problems ?? []);
+    const price = s.price_ct_per_kwh;
+    const tiles = [
+      ["Energy since boot", energy(s.energy_kwh)],
+      ["Cost since boot", price === null ? "–" : cost(s.cost_eur)],
+      ["Price now", price === null ? "–" : `${Math.round(price)} ct/kWh`],
+      ["Memory used", `${Math.round(s.all_memory.gpu_gb + s.all_memory.other_gb)} / ${Math.round(s.all_memory.total_gb)} GB`],
+    ];
+    $("tiles").replaceChildren(...tiles.map(([label, value]) => {
+      const tile = Object.assign(document.createElement("div"), {className: "tile"});
+      tile.append(Object.assign(document.createElement("span"), {textContent: label}),
+                  Object.assign(document.createElement("strong"), {textContent: value}));
+      return tile;
+    }));
+    // A value too long for its tile shrinks instead of spilling out.
+    for (const value of $("tiles").querySelectorAll("strong")) {
+      for (let size = 24; value.scrollWidth > value.clientWidth && size > 12; size--)
+        value.style.fontSize = `${size - 1}px`;
+    }
+
+    if (!$("charts").children.length) {
+      $("charts").replaceChildren(...CHARTS.map(spec => {
+        const chart = Object.assign(document.createElement("div"), {className: "chart", id: `chart-${spec.key}`});
+        chart.innerHTML = `<div class="chart-head"><span>${spec.title}</span><span></span></div>` +
+          `<div class="legend" hidden></div><svg></svg>`;
+        const svg = chart.querySelector("svg");
+        svg.addEventListener("pointermove", e => { hover[spec.key] = e.offsetX; drawChart(spec, lastStats); });
+        svg.addEventListener("pointerleave", () => { delete hover[spec.key]; drawChart(spec, lastStats); });
+        return chart;
+      }));
+    }
+    CHARTS.forEach(spec => drawChart(spec, s));
+
+    const since = new Date(s.counting_since).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
+    $("stats-note").textContent = `Counted since ${since}; the monitor starts at login. ` +
+      `Chip power only, from its ${s.power_source}; the whole computer draws more at the wall. ` +
+      (price === null ? "No market price yet."
+        : `Price: German market price now (${s.market_ct_per_kwh.toFixed(1)} ct) plus Esslingen grid fee, levies, taxes and VAT.`);
+  }
+
+  // Rounds a peak up to 1, 2 or 5 times a power of ten, for clean top ticks.
+  function niceCeiling(peak) {
+    const step = 10 ** Math.floor(Math.log10(Math.max(peak, 1)));
+    return [1, 2, 5, 10].map(m => m * step).find(top => top >= peak);
+  }
+
+  function drawChart(spec, s) {
+    const chart = $(`chart-${spec.key}`);
+    const svg = chart.querySelector("svg");
+    const times = s.history.time;
+    // Memory has no total series of its own: its parts add up to it.
+    const values = s.history[spec.key] ??
+      times.map((_, i) => spec.parts.reduce((sum, part) => sum + s.history[part.key][i], 0));
+    const current = values.at(-1) ?? 0;
+    const total = spec.total?.(s);
+    chart.querySelector(".chart-head span:last-child").textContent =
+      `${Math.round(current)}${total ? ` / ${Math.round(total)}` : ""}${spec.unit ? ` ${spec.unit}` : ""}`;
+
+    const width = svg.clientWidth, height = 132, left = 30, bottom = 18;
+    const plotW = width - left, plotH = height - bottom - 6;
+    const top = spec.ceiling ?? (total ? Math.round(total) : niceCeiling(Math.max(...values, 1)));
+    const end = times.at(-1), span = Math.max(end - times[0], 1);
+    const x = t => left + (t - (end - span)) / span * plotW;
+    const y = v => 6 + plotH - Math.min(v, top) / top * plotH;
+    const points = values.map((v, i) => `${x(times[i]).toFixed(1)},${y(v).toFixed(1)}`);
+    const minutes = Math.round(span / 60);
+    const parts = spec.parts?.every(part => part.now(s) != null) ? spec.parts : null;
+    showLegend(chart, parts, s, spec.unit);
+
+    let overlay = "";
+    if (hover[spec.key] !== undefined && values.length) {
+      const t = end - span + (hover[spec.key] - left) / plotW * span;
+      const i = times.reduce((best, time, j) => Math.abs(time - t) < Math.abs(times[best] - t) ? j : best, 0);
+      const cx = x(times[i]);
+      overlay = `<line class="crosshair" x1="${cx}" x2="${cx}" y1="6" y2="${6 + plotH}"/>` +
+                `<circle class="end" cx="${cx}" cy="${y(values[i])}" r="4"/>`;
+      // Samples from before the monitor could split have only the total.
+      const split = parts?.map(part => ({...part, value: s.history[part.key][i]}));
+      showTooltip(chart, cx, values[i], spec.unit, times[i], split?.some(part => part.value) ? split : null);
+    } else {
+      chart.querySelector(".tooltip")?.remove();
+    }
+
+    svg.innerHTML =
+      `<line class="grid" x1="${left}" x2="${width}" y1="${y(top)}" y2="${y(top)}"/>` +
+      `<line class="grid" x1="${left}" x2="${width}" y1="${y(0)}" y2="${y(0)}"/>` +
+      `<text class="tick" x="${left - 6}" y="${y(top) + 4}" text-anchor="end">${top}</text>` +
+      `<text class="tick" x="${left - 6}" y="${y(0) + 4}" text-anchor="end">0</text>` +
+      `<text class="tick" x="${left}" y="${height - 2}">${minutes} min ago</text>` +
+      `<text class="tick" x="${width}" y="${height - 2}" text-anchor="end">now</text>` +
+      (points.length > 1 ? (parts ? stackedBands(parts, s.history, times, x, y) +
+          `<path class="total" d="M${points.join(" L")}"/>`
+        : `<path class="area" d="M${points[0].split(",")[0]},${y(0)} L${points.join(" L")} L${x(end)},${y(0)} Z"/>` +
+          `<path class="line" d="M${points.join(" L")}"/>`) : "") +
+      (points.length && hover[spec.key] === undefined
+        ? `<circle class="end" cx="${x(end)}" cy="${y(current)}" r="4"/>` : "") +
+      overlay +
+      `<rect x="${left}" y="0" width="${plotW}" height="${height}" fill="transparent"/>`;
+  }
+
+  function stackedBands(parts, history, times, x, y) {
+    let below = times.map(() => 0);
+    // The total line drawn over the bands also covers samples without a split.
+    let bands = "", gaps = "";
+    for (const part of parts) {
+      const above = below.map((base, i) => base + history[part.key][i]);
+      const top = above.map((v, i) => `${x(times[i]).toFixed(1)},${y(v).toFixed(1)}`);
+      const bottom = below.map((v, i) => `${x(times[i]).toFixed(1)},${y(v).toFixed(1)}`).reverse();
+      bands += `<path class="band" style="fill: var(${part.color})" d="M${top.join(" L")} L${bottom.join(" L")} Z"/>`;
+      gaps += `<path class="gap" d="M${top.join(" L")}"/>`;
+      below = above;
+    }
+    return bands + gaps;
+  }
+
+  function showLegend(chart, parts, s, unit) {
+    const legend = chart.querySelector(".legend");
+    legend.hidden = !parts;
+    if (!parts) return;
+    legend.replaceChildren(...parts.map(part => {
+      const item = document.createElement("span");
+      const swatch = document.createElement("i");
+      swatch.style.background = `var(${part.color})`;
+      const value = part.now(s);
+      item.append(swatch, part.label, Object.assign(document.createElement("b"),
+        {textContent: `${value < 10 ? value.toFixed(1) : Math.round(value)} ${unit}`}));
+      return item;
+    }));
+  }
+
+  function showTooltip(chart, cx, value, unit, time, parts) {
+    let tip = chart.querySelector(".tooltip");
+    if (!tip) {
+      tip = Object.assign(document.createElement("div"), {className: "tooltip"});
+      chart.append(tip);
+    }
+    const strong = Object.assign(document.createElement("strong"),
+      {textContent: `${Math.round(value * 10) / 10}${unit ? ` ${unit}` : ""}`});
+    const when = Object.assign(document.createElement("span"),
+      {textContent: new Date(time * 1000).toLocaleTimeString()});
+    tip.replaceChildren(strong, when);
+    for (const part of parts ?? []) {
+      const row = document.createElement("div");
+      const key = Object.assign(document.createElement("i"), {});
+      key.style.background = `var(${part.color})`;
+      row.append(key, Object.assign(document.createElement("b"), {textContent: `${part.value} ${unit}`}),
+                 Object.assign(document.createElement("span"), {textContent: part.label}));
+      tip.append(row);
+    }
+    const left = Math.min(Math.max(cx - tip.offsetWidth / 2, 0), chart.clientWidth - tip.offsetWidth);
+    tip.style.left = `${left}px`;
+  }
+
+  // --- Wiring
+
+  $("key-form").addEventListener("submit", event => {
+    event.preventDefault();
+    key = $("key").value.trim();
+    localStorage.setItem("llm-key", key);
+    loadModels();
+  });
+
+  $("composer").addEventListener("submit", event => {
+    event.preventDefault();
+    if (streaming) return streaming.abort();
+    const text = $("prompt").value.trim();
+    if ((!text && !pending.length) || $("model").disabled) return;
+    $("prompt").value = "";
+    $("prompt").style.height = "";
+    send(text);
+  });
+
+  $("prompt").addEventListener("input", () => {
+    const prompt = $("prompt");
+    prompt.style.height = "auto";
+    prompt.style.height = `${prompt.scrollHeight}px`;
+    updateSend();
+  });
+
+  // Enter sends, Shift+Enter adds a line; composing (e.g. Japanese input) is left alone.
+  $("prompt").addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      $("composer").requestSubmit();
+    }
+  });
+
+  $("attach").addEventListener("click", () => {
+    if (!VISION_MODELS.includes($("model").value))
+      return toast(`Only ${VISION_MODELS.join(", ")} can look at pictures and videos`);
+    $("file").click();
+  });
+  $("file").addEventListener("change", () => { addFiles([...$("file").files]); $("file").value = ""; });
+  $("mic").addEventListener("click", () => toggleDictation().catch(error => toast(`Speech failed: ${error.message}`)));
+  $("talk").addEventListener("click", toggleTalk);
+
+  $("stats-button").addEventListener("click", toggleStats);
+  window.addEventListener("resize", () => lastStats && !$("stats").hidden && renderStats(lastStats));
+
+  $("model").addEventListener("change", () => localStorage.setItem("llm-model", $("model").value));
+
+  $("new-chat").addEventListener("click", () => {
+    if (!$("stats").hidden) toggleStats();
+    streaming?.abort();
+    turns = [];
+    $("messages").replaceChildren();
+    showWelcome(!key);
+    loadModels();
+  });
+
+  updateSend();
+  key ? loadModels() : showWelcome(true);
+</script>
+</body>
+</html>
