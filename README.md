@@ -172,7 +172,9 @@ the Responses API. Tool definitions sit at the start of the prompt, so the
 prefix cache keeps them between turns. Forcing a call (`tool_choice`
 `"required"` or a named tool) works on Qwen through vLLM's grammar for its
 call format; for Gemma, vLLM has none and silently ignored the force, so
-`vllm_plugins/local_llm_tools.py` adds one.
+`vllm_plugins/local_llm_tools.py` adds one. With `tool_choice` `"none"` the models
+do not see the tools at all: otherwise they still tried to call one, and the
+answer came back empty. That turn misses the prefix cache.
 
 `gpu-memory-utilization` per model is a share of *total* GPU memory, so the
 shares in `llm` must add up to less than 1. `./llm up` refuses a model whose

@@ -36,9 +36,12 @@ STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes st
 # ended, so a chat turn, which diverges where the last answer began, missed.
 # retention-interval keeps one every window (Gemma) or page (Qwen); they are
 # evicted like any cached block, so they cost no reserved memory.
+# With tool_choice "none" both models still tried to call a tool, which vLLM
+# dropped, leaving an empty or cut-off answer; hiding the tools fixes that, at
+# the cost of that one turn missing the prefix cache.
 MODELS=(
-  "qwen3.8-27b|8001|0.30|RedHatAI/Qwen3.8-27B-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1568 --attention-backend TRITON_ATTN --max-num-seqs 32 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-auto-tool-choice"
-  "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice"
+  "qwen3.8-27b|8001|0.30|RedHatAI/Qwen3.8-27B-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1568 --attention-backend TRITON_ATTN --max-num-seqs 32 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
 )
 MEMORY_BUDGET=0.95 # shares of all running models together; the rest is the desktop's
 WORKING_ROOM_GB=4  # beyond the weights: compiled graphs, activations, a minimal cache
