@@ -2,7 +2,6 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
-import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -15,7 +14,6 @@ const GATEWAY = 'http://127.0.0.1:8400';
 const PUBLIC_GATEWAY = `http://${GLib.get_host_name()}.local:8400`;
 // Everything measured comes from monitor.py, which samples every 2 s.
 const STATS = GLib.build_filenamev([GLib.get_user_state_dir(), 'local-llm', 'stats.json']);
-const CHAT_APP = 'io.github.nicolasmahn.LocalLlmChat.desktop';
 const STALE_SECONDS = 15; // older than this, the monitor is not running
 const POLL_SECONDS = 3;
 const HISTORY = 60; // monitor samples shown in each graph, so two minutes
@@ -419,43 +417,14 @@ class StatusButton extends PanelMenu.Button {
     }
 });
 
-const ChatButton = GObject.registerClass(
-class ChatButton extends PanelMenu.Button {
-    _init() {
-        super._init(0.5, 'Local LLM chat', true);
-        this.add_child(new St.Icon({
-            iconName: 'chat-message-new-symbolic',
-            styleClass: 'system-status-icon',
-        }));
-    }
-
-    vfunc_event(event) {
-        if (event.type() === Clutter.EventType.BUTTON_RELEASE ||
-            event.type() === Clutter.EventType.TOUCH_END) {
-            // The chat is its own project; its install.sh adds this desktop file.
-            const chat = Shell.AppSystem.get_default().lookup_app(CHAT_APP);
-            if (chat)
-                chat.activate();
-            else
-                Main.notify('Local LLM', 'The chat is not installed; run install.sh in local_llm_chat.');
-            return Clutter.EVENT_STOP;
-        }
-        return Clutter.EVENT_PROPAGATE;
-    }
-});
-
 export default class LocalLlmExtension extends Extension {
     enable() {
         this._status = new StatusButton(this);
-        this._chat = new ChatButton();
         Main.panel.addToStatusArea(`${this.uuid}-status`, this._status);
-        Main.panel.addToStatusArea(`${this.uuid}-chat`, this._chat);
     }
 
     disable() {
         this._status?.destroy();
-        this._chat?.destroy();
         this._status = null;
-        this._chat = null;
     }
 }

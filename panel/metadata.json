@@ -1,7 +1,7 @@
 {
   "uuid": "local-llm@nicolas",
   "name": "Local LLM",
-  "description": "Traffic on the local model gateway, and a button for the chat window.",
+  "description": "Traffic on the local model gateway.",
   "shell-version": ["48", "49"],
   "version": 1
 }

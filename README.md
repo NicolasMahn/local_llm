@@ -46,12 +46,11 @@ network could read prompts and the key. The model servers behind it (ports
 8001–8002) have no key and listen on localhost only; keep it that way.
 
 `panel/` is a GNOME Shell extension, symlinked into
-`~/.local/share/gnome-shell/extensions/local-llm@nicolas`. It adds two buttons
-to the top bar. One opens the chat window, once local_llm_chat is installed.
-The other shows how many requests are in the models right now; its menu has
-graphs of tokens per second, requests and GPU load, the GPU's memory, power and
-temperature, a switch per model (with why it failed, if it did), and the
-URLs and key to copy.
+`~/.local/share/gnome-shell/extensions/local-llm@nicolas`. It adds a button
+to the top bar that shows how many requests are in the models right now; its
+menu has graphs of tokens per second, requests and GPU load, the GPU's
+memory, power and temperature, a switch per model (with why it failed, if it
+did), and the URLs and key to copy.
 
 `monitor.py` measures power, energy and cost since boot, GPU load and the
 models' load every 2 s, for the panel and the chat page's graphs (the chart
