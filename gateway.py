@@ -1,8 +1,7 @@
 """One port in front of several vLLM servers.
 
 vLLM already speaks both the OpenAI and the Anthropic API, so the gateway
-only has to check the key and pick a backend: by the request's "model" field,
-or by path for audio uploads (multipart bodies have no JSON "model" to read).
+only has to check the key and pick a backend by the request's "model" field.
 It also serves a small test chat page at / for other devices on the network,
 and at /stats what monitor.py last measured, for that page's graphs.
 """
@@ -22,7 +21,6 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 BACKENDS = dict(
     pair.split("=", 1) for pair in os.environ["LLM_BACKENDS"].split(",")
 )
-AUDIO_MODEL = os.environ["LLM_AUDIO_MODEL"]
 API_KEY = os.environ["LLM_API_KEY"]
 STATS = Path("/state/stats.json")
 
@@ -116,15 +114,12 @@ async def health():
 async def proxy(path: str, request: Request):
     body = await request.body()
 
-    if path.startswith("audio/"):
-        model = AUDIO_MODEL
-    else:
-        try:
-            model = json.loads(body).get("model")
-        except ValueError:
-            return error(400, "Request body must be JSON.")
-        if model not in BACKENDS:
-            return error(404, f"Unknown model {model!r}. Available: {sorted(BACKENDS)}")
+    try:
+        model = json.loads(body).get("model")
+    except ValueError:
+        return error(400, "Request body must be JSON.")
+    if model not in BACKENDS:
+        return error(404, f"Unknown model {model!r}. Available: {sorted(BACKENDS)}")
     if refusal := not_live(model):
         return refusal
 

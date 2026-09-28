@@ -1,7 +1,5 @@
-# The Strix Halo vLLM build, plus the audio extras speech-to-text needs
-# (vllm[audio]; installed piecemeal so pip leaves the patched vLLM alone).
+# The Strix Halo vLLM build.
 FROM docker.io/kyuz0/vllm-therock-gfx1151:latest
-RUN pip install --no-cache-dir av scipy soundfile soxr "mistral_common[audio]"
 
 # The base image ships PyTorch's AOTriton library without its precompiled
 # kernels, so PyTorch's own attention (used by Gemma's image encoder) fails

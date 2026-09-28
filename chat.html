@@ -200,7 +200,6 @@
   .send { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; }
   #composer .icon-button { width: 36px; height: 36px; flex: none; }
   #composer:has(.icon-button:not([hidden])) { padding-left: 6px; }
-  .icon-button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
 
   /* Attachments: waiting above the message field, and inside sent messages. */
   #pending { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -266,12 +265,6 @@
       <button type="button" id="attach" class="icon-button" title="Attach a picture or video" aria-label="Attach">
         <svg viewBox="0 0 24 24"><path d="m21 12-8.6 8.6a5 5 0 0 1-7-7l8.5-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.3-2.4l7.9-7.9"/></svg>
       </button>
-      <button type="button" id="mic" class="icon-button" title="Dictate" aria-label="Dictate" hidden>
-        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
-      </button>
-      <button type="button" id="talk" class="icon-button" title="Let's talk" aria-label="Let's talk" hidden>
-        <svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg>
-      </button>
       <input type="file" id="file" multiple hidden
              accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm">
       <textarea id="prompt" rows="1" placeholder="Message" aria-label="Message"></textarea>
@@ -293,7 +286,6 @@
 <script>
   const $ = id => document.getElementById(id);
   const icon = name => $("icons").content.querySelector(`[data-name=${name}]`).cloneNode(true);
-  const AUDIO_MODEL = "qwen3-asr";
   // Only these models can look at pictures and videos (vLLM loads their vision part).
   const VISION_MODELS = ["gemma-4-26b"];
   // The formats Gemma was tested with; everything else is turned away.
@@ -430,11 +422,7 @@
   async function loadModels() {
     const response = await fetch("/v1/models", {headers: {authorization: `Bearer ${key}`}});
     if (response.status === 401) return showWelcome(true);
-    const running = (await response.json()).data.map(m => m.id);
-    const names = running.filter(n => n !== AUDIO_MODEL);
-    const speech = running.includes(AUDIO_MODEL);
-    $("mic").hidden = !speech && !dictation;
-    $("talk").hidden = !speech && !talking;
+    const names = (await response.json()).data.map(m => m.id);
     const select = $("model");
     select.replaceChildren(...(names.length ? names : ["no models running"]).map(n => new Option(n)));
     select.disabled = !names.length;
@@ -552,7 +540,6 @@
     else conversation.pop();
     streaming = null;
     updateSend();
-    return answer.trimStart() || null;
   }
 
   // --- Attachments
@@ -604,139 +591,6 @@
     }
     renderPending();
     updateSend();
-  }
-
-  // --- Speech: dictation, and "let's talk" (listen, answer, read aloud, listen again)
-
-  let dictation = null; // the MediaRecorder while dictating
-  let talking = null; // {stopped} while talking
-
-  // Browsers only hand out the microphone on https:// or localhost pages.
-  function microphoneAllowed() {
-    if (navigator.mediaDevices?.getUserMedia) return true;
-    toast("The browser only allows the microphone on https:// or localhost pages");
-    return false;
-  }
-
-  async function transcribe(blob) {
-    const form = new FormData();
-    form.append("model", AUDIO_MODEL);
-    form.append("file", blob, "speech.webm");
-    const response = await fetch("/v1/audio/transcriptions",
-      {method: "POST", headers: {authorization: `Bearer ${key}`}, body: form});
-    if (!response.ok) throw new Error((await response.json()).error?.message ?? response.statusText);
-    return (await response.json()).text.trim();
-  }
-
-  async function toggleDictation() {
-    if (dictation) return dictation.stop();
-    if (!microphoneAllowed()) return;
-    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-    const chunks = [];
-    dictation = new MediaRecorder(stream);
-    dictation.ondataavailable = event => chunks.push(event.data);
-    dictation.onstop = async () => {
-      stream.getTracks().forEach(track => track.stop());
-      const type = dictation.mimeType;
-      dictation = null;
-      $("mic").classList.remove("on");
-      $("prompt").placeholder = "Transcribing…";
-      try {
-        const text = await transcribe(new Blob(chunks, {type}));
-        $("prompt").value = `${$("prompt").value} ${text}`.trim();
-        $("prompt").dispatchEvent(new Event("input"));
-      } catch (error) {
-        toast(`Speech failed: ${error.message}`);
-      }
-      $("prompt").placeholder = "Message";
-      $("prompt").focus();
-    };
-    dictation.start();
-    $("mic").classList.add("on");
-  }
-
-  // Records one thing said: waits for speech, ends after 1.2 s of quiet. The
-  // first half second only measures the room, so speech means clearly louder.
-  function listenOnce(stream, analyser, state) {
-    return new Promise(resolve => {
-      const recorder = new MediaRecorder(stream);
-      const chunks = [], samples = new Float32Array(analyser.fftSize), levels = [];
-      let noise = null, heard = false, quiet = 0, waited = 0, spoken = 0, restart = false;
-      recorder.ondataavailable = event => chunks.push(event.data);
-      recorder.onstop = () => {
-        clearInterval(timer);
-        if (restart) return resolve(listenOnce(stream, analyser, state));
-        resolve(state.stopped || !heard ? null : new Blob(chunks, {type: recorder.mimeType}));
-      };
-      const timer = setInterval(() => {
-        if (state.stopped) return recorder.stop();
-        analyser.getFloatTimeDomainData(samples);
-        const level = Math.sqrt(samples.reduce((sum, s) => sum + s * s, 0) / samples.length);
-        if (noise === null) {
-          levels.push(level);
-          if (levels.length >= 5) noise = levels.sort((a, b) => a - b)[2];
-          return;
-        }
-        const loud = level > Math.max(3 * noise, 0.01);
-        if (!heard) {
-          heard = loud;
-          // Long silence: start a fresh recording rather than keep it all.
-          if (!heard && (waited += 0.1) > 20) { restart = true; recorder.stop(); }
-          return;
-        }
-        quiet = loud ? 0 : quiet + 0.1;
-        if (quiet >= 1.2 || (spoken += 0.1) >= 30) recorder.stop();
-      }, 100);
-      recorder.start(100);
-    });
-  }
-
-  // Reply text without the Markdown symbols a voice would read out.
-  const speakable = text => text.replace(/```[\s\S]*?```/g, " (code omitted) ").replace(/[*_`#>|]+/g, "").trim();
-
-  const speak = text => new Promise(resolve => {
-    const utterance = new SpeechSynthesisUtterance(speakable(text));
-    utterance.onend = utterance.onerror = resolve;
-    speechSynthesis.speak(utterance);
-  });
-
-  async function toggleTalk() {
-    if (talking) {
-      talking.stopped = true;
-      speechSynthesis.cancel();
-      return;
-    }
-    if (!microphoneAllowed()) return;
-    const state = talking = {stopped: false};
-    $("talk").classList.add("on");
-    let stream, context;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      context = new AudioContext();
-      const analyser = context.createAnalyser();
-      context.createMediaStreamSource(stream).connect(analyser);
-      while (!state.stopped) {
-        $("prompt").placeholder = "Listening…";
-        const blob = await listenOnce(stream, analyser, state);
-        if (!blob) break;
-        $("prompt").placeholder = "Transcribing…";
-        const text = await transcribe(blob);
-        if (!text || state.stopped) continue;
-        $("prompt").placeholder = "Thinking…";
-        const answer = await send(text);
-        if (!answer || state.stopped) break;
-        $("prompt").placeholder = "Speaking…";
-        await speak(answer);
-      }
-    } catch (error) {
-      toast(`Let's talk stopped: ${error.message}`);
-    } finally {
-      stream?.getTracks().forEach(track => track.stop());
-      context?.close();
-      talking = null;
-      $("talk").classList.remove("on");
-      $("prompt").placeholder = "Message";
-    }
   }
 
   // --- Measurements: what monitor.py samples, fetched while this view is open.
@@ -1010,8 +864,6 @@
     $("file").click();
   });
   $("file").addEventListener("change", () => { addFiles([...$("file").files]); $("file").value = ""; });
-  $("mic").addEventListener("click", () => toggleDictation().catch(error => toast(`Speech failed: ${error.message}`)));
-  $("talk").addEventListener("click", toggleTalk);
 
   $("stats-button").addEventListener("click", toggleStats);
   window.addEventListener("resize", () => lastStats && !$("stats").hidden && renderStats(lastStats));

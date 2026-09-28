@@ -24,9 +24,6 @@ the OpenAI and the Anthropic API.
       -d '{"model": "gemma-4-26b", "max_tokens": 100,
            "messages": [{"role": "user", "content": "hi"}]}'
 
-    curl fedora.local:8400/v1/audio/transcriptions -H "authorization: Bearer $KEY" \
-      -F file=@clip.wav -F model=qwen3-asr
-
 OpenAI clients use `http://fedora.local:8400/v1` as base URL, Anthropic
 clients `http://fedora.local:8400`. Opening `http://fedora.local:8400` in a
 browser on any device in the network gives a small test chat. It asks for the
@@ -35,23 +32,18 @@ saves it in one step (the panel's "Chat" row copies that link).
 
 The page takes pictures and videos (PNG, JPEG, WebP, GIF, MP4, WebM, up to
 50 MB) for `gemma-4-26b`, the one model here that can see; with another model
-selected it says so instead. While `qwen3-asr` runs it also shows a microphone
-(dictate into the message field) and "let's talk": it listens until you
-pause, sends what you said, reads the answer aloud and listens again.
-Browsers only allow the microphone on `https://` or `localhost` pages, so on
-other devices the page cannot listen. The desktop chat window, which also
-keeps past chats, is its own project, local_llm_chat.
+selected it says so instead. The desktop chat window, which also keeps past
+chats, is its own project, local_llm_chat.
 
 | Model | Role |
 |---|---|
 | `qwen3.8-27b` | the smart one: hard tasks, batch jobs. Slow per request (dense). |
 | `gemma-4-26b` | the fast one: agents and high-volume work; sees pictures and videos. |
-| `qwen3-asr` | speech to text. |
 
 The gateway listens on the local network and wants the key from
 `~/.config/local-llm/api-key`. The traffic is plain HTTP, so anyone on the same
 network could read prompts and the key. The model servers behind it (ports
-8001–8004) have no key and listen on localhost only; keep it that way.
+8001–8002) have no key and listen on localhost only; keep it that way.
 
 `panel/` is a GNOME Shell extension, symlinked into
 `~/.local/share/gnome-shell/extensions/local-llm@nicolas`. It adds two buttons
@@ -171,8 +163,7 @@ a VM's and the browser's GPU queues. Compare against it at short context, as
 ## Notes
 
 The gateway is only a router: vLLM itself serves both API styles, so requests
-are forwarded untouched, by the `model` field (or to the speech model for
-`/v1/audio/*`, whose multipart bodies carry no JSON field to read).
+are forwarded untouched, by the `model` field.
 
 `gpu-memory-utilization` per model is a share of *total* GPU memory, so the
 shares in `llm` must add up to less than 1. `./llm up` refuses a model whose
@@ -196,7 +187,3 @@ much memory all models share.
 * K2 Horizon (the faster, smarter pick) has no working vLLM implementation.
   Watch <https://github.com/vllm-project/vllm/pull/53806>; swapping it in is
   one line in `llm`.
-* A model that understands sounds beyond speech (music, noises, tone of
-  voice). MiniCPM-o could, but was dropped: Gemma covers pictures and video,
-  qwen3-asr covers speech, and its spoken replies need `vllm-omni`, which is
-  not in this container.

@@ -39,9 +39,7 @@ STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes st
 MODELS=(
   "qwen3.8-27b|8001|0.30|RedHatAI/Qwen3.8-27B-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1568 --attention-backend TRITON_ATTN --max-num-seqs 32 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-auto-tool-choice"
   "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice"
-  "qwen3-asr|8004|0.10|Qwen/Qwen3-ASR-1.7B|--max-model-len 8192 --max-num-seqs 16"
 )
-AUDIO_MODEL=qwen3-asr
 MEMORY_BUDGET=0.95 # shares of all running models together; the rest is the desktop's
 WORKING_ROOM_GB=4  # beyond the weights: compiled graphs, activations, a minimal cache
 
@@ -100,7 +98,7 @@ start_gateway() {
   mkdir -p "$STATE_DIR"
   podman run -d --replace --name llm-gateway --init --network host \
     -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" --security-opt label=disable -w /app \
-    -e LLM_BACKENDS="${backends[*]}" -e LLM_AUDIO_MODEL="$AUDIO_MODEL" \
+    -e LLM_BACKENDS="${backends[*]}" \
     -e LLM_API_KEY="$(api_key)" \
     "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
   echo "gateway and test chat on http://$(hostname).local:$GATEWAY_PORT"
