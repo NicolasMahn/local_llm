@@ -1,6 +1,6 @@
 """Checks the fast prefill path against vLLM's own kernel, on the GPU.
 
-Run inside the model image: python3 attention/test_attention.py
+Run inside the model image: python3 vllm_plugins/test_attention.py
 Contexts stay short enough that vLLM's slow kernel cannot trip the GPU watchdog.
 """
 

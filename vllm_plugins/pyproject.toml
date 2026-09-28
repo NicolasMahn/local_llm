@@ -1,0 +1,15 @@
+[project]
+name = "local-llm-plugins"
+version = "1"
+description = "vLLM fixes for this box: long-context prefill attention, forced tool calls for Gemma 4"
+
+[project.entry-points."vllm.general_plugins"]
+local_llm_attention = "local_llm_attention:register"
+local_llm_tools = "local_llm_tools:register"
+
+[tool.setuptools]
+py-modules = ["local_llm_attention", "local_llm_tools"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

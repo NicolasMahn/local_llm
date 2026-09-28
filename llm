@@ -28,7 +28,7 @@ STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes st
 # A single GPU call that runs for seconds keeps the desktop off the GPU, and
 # after 2 s the kernel resets it (README). Prefill steps of 512 tokens keep
 # each call short; the default 8192 crashed the desktop. Attention calls also
-# grow with the context: attention/ keeps them short for Gemma and Qwen up to
+# grow with the context: vllm_plugins/ keeps them short for Gemma and Qwen up to
 # their full 262k. Qwen still reads slowly there (~9 s per step at 255k).
 # Long contexts are only usable when follow-ups come from the prefix cache.
 # Gemma's sliding-window layers and Qwen's recurrent layers can only resume

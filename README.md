@@ -125,12 +125,12 @@ recover from.
 vLLM's attention kernel on this GPU reads the whole context again for every
 two prompt tokens, so its single calls grow with the context: with Gemma
 4's 512-wide heads a step took 0.1 s longer per 1,000 tokens, and one call
-passes 2 s somewhere beyond 64k. `attention/` holds the fixes, built into
+passes 2 s somewhere beyond 64k. `vllm_plugins/` holds the fixes, built into
 the image:
 
 - a vLLM plugin that computes Gemma's prefill attention as chunked matrix
   multiplies instead, each call a few milliseconds (tested against vLLM's
-  kernel by `attention/test_attention.py`). Gemma has its full 262k: a
+  kernel by `vllm_plugins/test_attention.py`). Gemma has its full 262k: a
   255k-token prompt reads in about 12 minutes. Answers come at ~32 tokens/s
   at short context, ~11 at 128k and ~6 at 255k. If a vLLM update moves the
   function it replaces, the model refuses to start rather than running its
@@ -157,12 +157,22 @@ conversation pushes the first one out.
 Benchmarks must not run vLLM's own attention kernel on contexts past 64k: a
 single call on 255k ran long enough (2026-09-27T19:22) that the kernel reset
 a VM's and the browser's GPU queues. Compare against it at short context, as
-`attention/test_attention.py` does, and time only the fixed paths beyond.
+`vllm_plugins/test_attention.py` does, and time only the fixed paths beyond.
 
 ## Notes
 
 The gateway is only a router: vLLM itself serves both API styles, so requests
 are forwarded untouched, by the `model` field.
+
+Both models call tools, which is all MCP needs: the MCP client (an agent,
+Claude Code) turns an MCP server's tools into ordinary tool definitions.
+Tested on both APIs, also streamed: single and parallel calls, picking the
+right tool out of 41, tool results with pictures (Gemma) or 100k tokens, and
+the Responses API. Tool definitions sit at the start of the prompt, so the
+prefix cache keeps them between turns. Forcing a call (`tool_choice`
+`"required"` or a named tool) works on Qwen through vLLM's grammar for its
+call format; for Gemma, vLLM has none and silently ignored the force, so
+`vllm_plugins/local_llm_tools.py` adds one.
 
 `gpu-memory-utilization` per model is a share of *total* GPU memory, so the
 shares in `llm` must add up to less than 1. `./llm up` refuses a model whose

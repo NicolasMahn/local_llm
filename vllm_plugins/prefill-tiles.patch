@@ -9,7 +9,7 @@ index ce4a85c..f7d0b0c 100644
 +    # Strix Halo (gfx1151), full-attention prefill with 256-wide heads, as in
 +    # Qwen3.8: with 16 rows each work unit covers two prompt tokens and reads
 +    # the whole context for them. 128 rows and 64-key tiles made it 9x faster
-+    # (local_llm: attention/).
++    # (local_llm: vllm_plugins/).
 +    tuned_rdna_prefill = (
 +        head_size == 256
 +        and max_seqlen_q > 1
