@@ -55,10 +55,17 @@ field() { cut -d'|' -f"$2" <<<"$1"; }
 # The caches live on the host so compiled kernels survive container restarts.
 # Triton only keeps its kernel tuning results when asked to; without them every
 # start re-benchmarks Qwen's recurrent-layer kernels, which takes most of an hour.
+# Removes containers, also ones whose runtime files podman lost (README): the
+# first try then stops the container but fails to confirm it, the second works.
+remove() {
+  podman rm -f --ignore "$@" >/dev/null 2>&1 || podman rm -f --ignore "$@" >/dev/null
+}
+
 run_container() {
   local name=$1; shift
   mkdir -p "$HOME/.cache/llm-kernels/triton" "$HOME/.cache/llm-kernels/comgr"
-  podman run -d --replace --name "llm-$name" --init --restart on-failure:3 \
+  remove "llm-$name"
+  podman run -d --name "llm-$name" --init --restart on-failure:3 \
     --network host --ipc host \
     --device /dev/kfd --device /dev/dri --group-add keep-groups \
     --security-opt seccomp=unconfined --security-opt label=disable \
@@ -99,7 +106,8 @@ start_gateway() {
   done
   local IFS=,
   mkdir -p "$STATE_DIR"
-  podman run -d --replace --name llm-gateway --init --network host \
+  remove llm-gateway
+  podman run -d --name llm-gateway --init --network host \
     -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" --security-opt label=disable -w /app \
     -e LLM_BACKENDS="${backends[*]}" \
     -e LLM_API_KEY="$(api_key)" \
@@ -227,7 +235,9 @@ UNIT
 }
 
 down() {
-  podman ps -a --format '{{.Names}}' | grep '^llm-' | xargs -r podman rm -f
+  local names
+  names=$(podman ps -a --format '{{.Names}}' | grep '^llm-')
+  [[ -z $names ]] || remove $names
 }
 
 # Everything runs from main, called on the last line: bash reads a script while
@@ -236,7 +246,7 @@ down() {
 main() {
   case "${1:-}" in
     up) shift; up "$@" ;;
-    stop) podman rm -f --ignore "llm-$2" >/dev/null ;;
+    stop) remove "llm-$2" ;;
     down) down ;;
     gateway) start_gateway ;;
     status)

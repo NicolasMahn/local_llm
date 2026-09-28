@@ -7,6 +7,7 @@ and the gateway answers requests for a model that is not live with its state.
 """
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -20,6 +21,9 @@ RAM_LOW_GB = 4
 HOT_C = 95
 FIRST_START_LIMIT = 90 * 60  # seconds; a model with no start on record gets this long
 TERMINATED = "terminated"  # a container's reason when a signal from outside ended it
+# Where podman keeps each running container's runtime files, including the
+# one its monitor process writes the exit code to.
+PODMAN_PERSIST = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "libpod/tmp/persist"
 
 
 def iso(epoch):
@@ -160,6 +164,16 @@ class Health:
                 problem("warning", f"{name} crashed and was restarted {container['Restarts']}×")
             states[name] = state
         self.states = states
+
+        # `podman system reset`, even one meant for other storage, deletes these
+        # files under running containers (2026-09-28T14:14). They keep serving,
+        # but podman no longer learns how they end, so a crash is not restarted.
+        lost = [name for name, container in containers.items()
+                if container["State"] == "running" and PODMAN_PERSIST.is_dir()
+                and not (PODMAN_PERSIST / container["Id"]).exists()]
+        if lost:
+            problem("warning", f"podman lost track of {', '.join(sorted(lost))} (its runtime files were "
+                    "deleted), so a crash there would not be restarted; restart with ./llm up or ./llm gateway")
 
         if self.kernel.hangs:
             last = self.kernel.hangs[-1]

@@ -95,6 +95,11 @@ warning) and the chat page (a dot on the chart button):
 - a model that crashed, with the reason from its log;
 - a model stopped from outside, e.g. by logging out: without
   `loginctl enable-linger` a logout ends every model;
+- a container podman lost track of: `podman system reset`, even one pointed
+  at other storage with `XDG_DATA_HOME`, deletes the runtime files of running
+  containers (it happened at 2026-09-28T14:14). They keep serving, but a crash
+  would not be restarted, and stopping them takes two tries, which `./llm`
+  does on its own;
 - a start taking far longer than that model's last one (kept in
   `~/.local/state/local-llm/starts.json`);
 - the GPU busy for minutes with nothing to do;
