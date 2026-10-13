@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import anyio
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,6 +24,9 @@ BACKENDS = dict(
 )
 API_KEY = os.environ["LLM_API_KEY"]
 STATS = Path("/state/stats.json")
+# No request is read into memory beyond this; the chat page's largest
+# attachment is 50 MB, which base64 grows by a third.
+LARGEST_BODY = 100 * 1024**2
 
 app = FastAPI()
 client = httpx.AsyncClient(timeout=None)
@@ -73,6 +77,40 @@ async def require_key(request: Request, call_next):
     return await call_next(request)
 
 
+async def read_body(request: Request) -> bytes | None:
+    """The request body, or None when it is larger than LARGEST_BODY."""
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > LARGEST_BODY:
+            return None
+    return bytes(body)
+
+
+class Forwarded(StreamingResponse):
+    """A backend's answer, passed on as it arrives.
+
+    Closes the backend's side here rather than in a background task, which is
+    skipped when the client hangs up mid-answer: the model must stop writing
+    then.
+    """
+
+    def __init__(self, upstream: httpx.Response):
+        super().__init__(
+            upstream.aiter_raw(),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+        )
+        self.upstream = upstream
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await self.upstream.aclose()
+
+
 @app.get("/")
 async def chat_page():
     # Public on purpose: the page holds no key, it asks the visitor for one.
@@ -112,12 +150,14 @@ async def health():
 
 @app.post("/v1/{path:path}")
 async def proxy(path: str, request: Request):
-    body = await request.body()
+    body = await read_body(request)
+    if body is None:
+        return error(413, f"Requests can be up to {LARGEST_BODY // 1024**2} MB.")
 
     try:
         model = json.loads(body).get("model")
-    except ValueError:
-        return error(400, "Request body must be JSON.")
+    except (ValueError, AttributeError):
+        return error(400, "Request body must be a JSON object.")
     if model not in BACKENDS:
         return error(404, f"Unknown model {model!r}. Available: {sorted(BACKENDS)}")
     if refusal := not_live(model):
@@ -138,10 +178,4 @@ async def proxy(path: str, request: Request):
         )
     except httpx.HTTPError as exc:
         return error(502, f"{model} is not answering: {exc}")
-
-    return StreamingResponse(
-        upstream.aiter_raw(),
-        status_code=upstream.status_code,
-        media_type=upstream.headers.get("content-type"),
-        background=upstream.aclose,
-    )
+    return Forwarded(upstream)

@@ -10,6 +10,7 @@ the OpenAI and the Anthropic API.
     ./llm status         which servers answer
     ./llm logs <name>    follow one server
     ./llm key            the API key (made on first start)
+    ./llm web <name>     serve the gateway to the internet over HTTPS
     ./llm down           stop everything
     ./llm gateway        restart the gateway (after editing gateway.py)
 
@@ -27,7 +28,7 @@ the OpenAI and the Anthropic API.
 OpenAI clients use `http://fedora.local:8400/v1` as base URL, Anthropic
 clients `http://fedora.local:8400`. Opening `http://fedora.local:8400` in a
 browser on any device in the network gives a small test chat. It asks for the
-key once and keeps it in that browser; `http://fedora.local:8400/?api=<key>`
+key once and keeps it in that browser; `http://fedora.local:8400/#api=<key>`
 saves it in one step (the panel's "Chat" row copies that link).
 
 The page takes pictures and videos (PNG, JPEG, WebP, GIF, MP4, WebM, up to
@@ -44,6 +45,19 @@ The gateway listens on the local network and wants the key from
 `~/.config/local-llm/api-key`. The traffic is plain HTTP, so anyone on the same
 network could read prompts and the key. The model servers behind it (ports
 8001–8002) have no key and listen on localhost only; keep it that way.
+
+## From the internet
+
+`./llm web <name>` puts Caddy in front of the gateway: HTTPS under that name,
+with a certificate it gets and renews itself. The name must point at the
+router (a MyFRITZ or other dynamic DNS name), and the router must forward its
+port 443 to port 8443 of this computer; nothing else is forwarded.
+`./llm web off` closes it again. `./llm url` prints the address in use, which
+also works inside the network.
+
+The key is all that stands between the internet and the models, and it has
+no limits: do not hand it out. To replace it, delete
+`~/.config/local-llm/api-key` and run `./llm gateway`.
 
 `panel/` is a GNOME Shell extension, symlinked into
 `~/.local/share/gnome-shell/extensions/local-llm@nicolas`. It adds a button

@@ -296,9 +296,10 @@
   const LARGEST_ATTACHMENT = 50 * 1024 ** 2;
   let pending = []; // attachments for the next message: {kind, name, url}
 
-  // A link like /?api=sk-… (the panel copies one) saves the key, then drops it
-  // from the address bar so it does not linger on screen.
-  const keyFromLink = new URLSearchParams(location.search).get("api");
+  // A link like /#api=sk-… (the panel copies one) saves the key, then drops it
+  // from the address bar so it does not linger on screen. It sits after the #
+  // because that part of a link is never sent to a server or kept in its logs.
+  const keyFromLink = new URLSearchParams(location.hash.slice(1)).get("api");
   if (keyFromLink) {
     localStorage.setItem("llm-key", keyFromLink);
     window.history.replaceState(null, "", location.pathname);

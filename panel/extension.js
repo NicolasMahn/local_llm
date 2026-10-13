@@ -10,8 +10,6 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const GATEWAY = 'http://127.0.0.1:8400';
-// What other machines on the network use; the hostname resolves through mDNS.
-const PUBLIC_GATEWAY = `http://${GLib.get_host_name()}.local:8400`;
 // Everything measured comes from monitor.py, which samples every 2 s.
 const STATS = GLib.build_filenamev([GLib.get_user_state_dir(), 'local-llm', 'stats.json']);
 const STALE_SECONDS = 15; // older than this, the monitor is not running
@@ -168,11 +166,12 @@ class StatusButton extends PanelMenu.Button {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._key = '';
-        this._addCopyRow('OpenAI', `${PUBLIC_GATEWAY}/v1`);
-        this._addCopyRow('Anthropic', PUBLIC_GATEWAY);
+        this._address = ''; // what other machines use, from ./llm url
+        this._openaiRow = this._addCopyRow('OpenAI', () => `${this._address}/v1`);
+        this._anthropicRow = this._addCopyRow('Anthropic', () => this._address);
         this._keyRow = this._addCopyRow('Key', () => this._key);
         // Opening this on a phone saves the key there, so the test chat just works.
-        this._chatRow = this._addCopyRow('Chat', () => `${PUBLIC_GATEWAY}/?api=${this._key}`);
+        this._chatRow = this._addCopyRow('Chat', () => `${this._address}/#api=${this._key}`);
 
         this._load().catch(logError);
     }
@@ -182,11 +181,17 @@ class StatusButton extends PanelMenu.Button {
         for (const line of list.trim().split('\n')) {
             this._addModelRow(line.split(' ')[0]);
         }
+        this._address = (await run([this._llm, 'url'])).trim();
         this._key = (await run([this._llm, 'key'])).trim();
-        this._keyRow.shown = `${this._key.slice(0, 12)}…`;
-        this._keyRow.detail.text = this._keyRow.shown;
-        this._chatRow.shown = `${PUBLIC_GATEWAY}/?api=…`;
-        this._chatRow.detail.text = this._chatRow.shown;
+        for (const [row, shown] of [
+            [this._openaiRow, `${this._address}/v1`],
+            [this._anthropicRow, this._address],
+            [this._keyRow, `${this._key.slice(0, 12)}…`],
+            [this._chatRow, `${this._address}/#api=…`],
+        ]) {
+            row.shown = shown;
+            row.detail.text = shown;
+        }
 
         this._poll().catch(logError);
         this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, POLL_SECONDS, () => {

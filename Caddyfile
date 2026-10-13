@@ -1,0 +1,21 @@
+# The way in from the internet: HTTPS in front of the gateway. Started by
+# ./llm web, which sets the name. The router forwards its port 443 here.
+{
+	# Ports above 1024, so the container needs no root and no firewall change.
+	https_port 8443
+	http_port 8480
+	auto_https disable_redirects
+	admin off
+}
+
+{$LLM_PUBLIC_NAME} {
+	# Only port 443 is forwarded, so the certificate is proven over it.
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	# Which models run is nobody's business out there.
+	respond /health 404
+	reverse_proxy 127.0.0.1:8400
+}

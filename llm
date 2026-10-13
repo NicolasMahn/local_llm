@@ -9,14 +9,20 @@
 #   ./llm logs <name>    follow one server's log
 #   ./llm list           print each model's name and port
 #   ./llm key            print the API key clients must send
+#   ./llm url            print the address other machines use
+#   ./llm web [name]     serve the gateway to the internet over HTTPS, under
+#                        this name (kept for next time); ./llm web off ends it
 #   ./llm monitor        install and start the power and load monitor (once)
 set -euo pipefail
 
 IMAGE=localhost/local-llm:latest
+WEB_IMAGE=docker.io/library/caddy:2
 GATEWAY_PORT=8400
+WEB_PORT=8443 # the router forwards its port 443 here, see Caddyfile
 # Resolved, because the GNOME panel runs this through a symlink.
 HERE=$(dirname "$(readlink -f "$0")")
 KEY_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/local-llm/api-key
+WEB_NAME_FILE=$(dirname "$KEY_FILE")/web-name # the public name; no file, no way in from outside
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes stats.json here
 
 # name | port | GPU memory share | Hugging Face repo | extra vLLM flags
@@ -87,11 +93,45 @@ api_key() {
   cat "$KEY_FILE"
 }
 
+# The public name when there is one: it also works inside the network, and
+# with HTTPS. Otherwise the hostname, which resolves there through mDNS.
+url() {
+  if [[ -s $WEB_NAME_FILE ]]; then
+    echo "https://$(<"$WEB_NAME_FILE")"
+  else
+    echo "http://$(hostname -s).local:$GATEWAY_PORT"
+  fi
+}
+
+# Caddy gets and renews the certificate on its own and keeps it on the host,
+# so restarts do not ask Let's Encrypt again and run into its limits.
+web() {
+  local certs=${XDG_DATA_HOME:-$HOME/.local/share}/local-llm/caddy
+  if [[ ${1:-} == off ]]; then
+    rm -f "$WEB_NAME_FILE"
+    remove llm-web
+    return
+  fi
+  [[ -z ${1:-} ]] || echo "$1" >"$WEB_NAME_FILE"
+  [[ -s $WEB_NAME_FILE ]] || { echo "which name? ./llm web <name>" >&2; return 1; }
+  mkdir -p "$certs"
+  running gateway || start_gateway
+  remove llm-web
+  podman run -d --name llm-web --restart on-failure:3 --network host \
+    -v "$HERE/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$certs:/data" --security-opt label=disable \
+    -e LLM_PUBLIC_NAME="$(<"$WEB_NAME_FILE")" \
+    "$WEB_IMAGE" >/dev/null 9>&-
+  echo "$(url) once the router forwards port 443 to port $WEB_PORT here"
+}
+
 # Left alone when it already runs, so starting one model does not cut off
 # answers that are streaming from another.
 ensure_gateway() {
   if ! running gateway; then
     start_gateway
+  fi
+  if [[ -s $WEB_NAME_FILE ]] && ! running web; then
+    web
   fi
 }
 
@@ -112,7 +152,7 @@ start_gateway() {
     -e LLM_BACKENDS="${backends[*]}" \
     -e LLM_API_KEY="$(api_key)" \
     "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
-  echo "gateway and test chat on http://$(hostname).local:$GATEWAY_PORT"
+  echo "gateway and test chat on $(url)"
 }
 
 running() {
@@ -268,8 +308,10 @@ PY
     logs) podman logs -f "llm-$2" ;;
     list) for model in "${MODELS[@]}"; do echo "$(field "$model" 1) $(field "$model" 2)"; done ;;
     key) api_key ;;
+    url) url ;;
+    web) shift; web "$@" ;;
     monitor) install_monitor ;;
-    *) sed -n '2,13p' "$0"; exit 1 ;;
+    *) sed -n '2,15p' "$0"; exit 1 ;;
   esac
 }
 
