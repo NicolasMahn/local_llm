@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Start and stop the local model servers and the gateway in front of them.
 #
-#   ./llm up [name...]   start the gateway and the given models (default: all)
+#   ./llm up [name...]   start the gateway and the given models (default: the
+#                        ones that ran last, which is what happens at boot)
 #   ./llm stop <name>    stop one model
 #   ./llm down           stop everything
 #   ./llm gateway        restart the gateway, e.g. after editing gateway.py
@@ -9,10 +10,13 @@
 #   ./llm logs <name>    follow one server's log
 #   ./llm list           print each model's name and port
 #   ./llm key            print the API key clients must send
+#   ./llm admin-key      print the key that may also start and stop models
 #   ./llm url            print the address other machines use
 #   ./llm web [name]     serve the gateway to the internet over HTTPS, under
 #                        this name (kept for next time); ./llm web off ends it
-#   ./llm monitor        install and start the power and load monitor (once)
+#   ./llm install        install and start the monitor and the control service
+#                        (once; they start at boot from then on)
+#   ./llm config         print the models and memory budget as JSON
 set -euo pipefail
 
 IMAGE=localhost/local-llm:latest
@@ -22,15 +26,25 @@ WEB_PORT=8443 # the router forwards its port 443 here, see Caddyfile
 # Resolved, because the GNOME panel runs this through a symlink.
 HERE=$(dirname "$(readlink -f "$0")")
 KEY_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/local-llm/api-key
+ADMIN_KEY_FILE=$(dirname "$KEY_FILE")/admin-key
 WEB_NAME_FILE=$(dirname "$KEY_FILE")/web-name # the public name; no file, no way in from outside
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes stats.json here
+# The models that should run: `up <name>` adds to it, `stop` takes out, `down`
+# empties it, and a plain `up` (the control service runs one at boot) starts them.
+WANTED_FILE=$STATE_DIR/wanted
+CONTROL_DIR=${XDG_RUNTIME_DIR:-/tmp}/local-llm # control.py's socket, for the gateway
 
 # name | port | GPU memory share | Hugging Face repo | extra vLLM flags
 # The shares add up to less than 1.0 so the desktop keeps some memory.
 # Qwen3.8 mixes attention with a recurrent layer whose cache is one block per
 # concurrent request, so max-num-seqs has to stay within the memory share.
-# Sized for the GPU borrowing up to 110 GB of RAM (README): together 0.65,
-# about 72 GB, leaving the desktop the rest.
+# Sized for the GPU borrowing up to 110 GB of RAM (README). Not all of them
+# fit at once: they are options, and ./llm up refuses one that would push the
+# running shares past MEMORY_BUDGET (the website can stop others to make room).
+# Gemma 4 12B is the one that hears (audio, up to 30 s a clip). Gemma 4 31B
+# keeps the most per token (4 global KV heads over 60 layers): its full 262k
+# would need 22 GB of cache, a 0.42 share; it gets 131k instead, which a dense
+# 31B reads slowly anyway, and so still runs next to two others.
 # A single GPU call that runs for seconds keeps the desktop off the GPU, and
 # after 2 s the kernel resets it (README). Prefill steps of 512 tokens keep
 # each call short; the default 8192 crashed the desktop. Attention calls also
@@ -48,6 +62,9 @@ STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes st
 MODELS=(
   "qwen3.8-27b|8001|0.30|RedHatAI/Qwen3.8-27B-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1568 --attention-backend TRITON_ATTN --max-num-seqs 32 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
   "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "gemma-4-12b|8003|0.18|google/gemma-4-12B-it-qat-w4a16-ct|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "gemma-4-31b|8004|0.32|google/gemma-4-31B-it-qat-w4a16-ct|--max-model-len 131072 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "muse-glimmer-30b|8005|0.30|RedHatAI/Muse-Glimmer-30B-INT4|--max-model-len 131072 --max-num-batched-tokens 512 --prefix-cache-retention-interval 2048 --reasoning-parser muse_glimmer --tool-call-parser muse_glimmer --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
 )
 MEMORY_BUDGET=0.95 # shares of all running models together; the rest is the desktop's
 WORKING_ROOM_GB=4  # beyond the weights: compiled graphs, activations, a minimal cache
@@ -58,6 +75,10 @@ field() { cut -d'|' -f"$2" <<<"$1"; }
 # ignore the stop signal and podman would wait 10 s before killing it.
 # --restart brings a crashed model back (a GPU reset kills them all), but only
 # three times, so one that cannot start stays down with its reason.
+# Host networking lets the model servers' engines pick an address for their
+# internal sockets, and they took the network card's (2026-10-29): anyone in
+# the network could have reached them without a key. VLLM_HOST_IP and
+# GLOO_SOCKET_IFNAME keep them on loopback; health.py checks.
 # The caches live on the host so compiled kernels survive container restarts.
 # Triton only keeps its kernel tuning results when asked to; without them every
 # start re-benchmarks Qwen's recurrent-layer kernels, which takes most of an hour.
@@ -67,11 +88,20 @@ remove() {
   podman rm -f --ignore "$@" >/dev/null 2>&1 || podman rm -f --ignore "$@" >/dev/null
 }
 
+# Containers must outlive whatever started them. podman leaves each one's
+# monitor process (conmon) in the caller's cgroup, so a container started from
+# the panel ended with GNOME Shell (as at logout), one started from a terminal
+# app with that app, and podman then lost track of it. A scope of its own, in
+# the local-llm slice, keeps it apart; health.py warns about any that are not.
+podman_run() {
+  systemd-run --user --scope --quiet --collect --slice=local-llm podman run "$@"
+}
+
 run_container() {
   local name=$1; shift
   mkdir -p "$HOME/.cache/llm-kernels/triton" "$HOME/.cache/llm-kernels/comgr"
   remove "llm-$name"
-  podman run -d --name "llm-$name" --init --restart on-failure:3 \
+  podman_run -d --name "llm-$name" --init --restart on-failure:3 \
     --network host --ipc host \
     --device /dev/kfd --device /dev/dri --group-add keep-groups \
     --security-opt seccomp=unconfined --security-opt label=disable \
@@ -79,18 +109,50 @@ run_container() {
     -v "$HOME/.cache/vllm:/root/.cache/vllm" \
     -v "$HOME/.cache/llm-kernels/triton:/root/.triton" \
     -v "$HOME/.cache/llm-kernels/comgr:/root/.cache/comgr" \
-    -e HF_HUB_OFFLINE=1 \
+    -e HF_HUB_OFFLINE=1 -e VLLM_HOST_IP=127.0.0.1 -e GLOO_SOCKET_IFNAME=lo \
     -e TRITON_CACHE_AUTOTUNING=1 -e TRITON_PRINT_AUTOTUNING=1 \
     "$IMAGE" "$@" >/dev/null 9>&-
   echo "started llm-$name"
 }
 
-api_key() {
-  if [[ ! -s $KEY_FILE ]]; then
-    mkdir -p "$(dirname "$KEY_FILE")"
-    (umask 077; echo "sk-local-$(head -c 24 /dev/urandom | base64 | tr '+/' '-_')" >"$KEY_FILE")
+# Made on first use. Two keys, so the one that sits in every client cannot
+# also stop models (or, later, the computer): the admin key can do both.
+make_key() {
+  local file=$1 prefix=$2
+  if [[ ! -s $file ]]; then
+    mkdir -p "$(dirname "$file")"
+    (umask 077; echo "$prefix-$(head -c 24 /dev/urandom | base64 | tr '+/' '-_')" >"$file")
   fi
-  cat "$KEY_FILE"
+  cat "$file"
+}
+api_key() { make_key "$KEY_FILE" sk-local; }
+admin_key() { make_key "$ADMIN_KEY_FILE" sk-admin; }
+
+# Edits to the wanted list take turns: the control service may stop one model
+# while another starts.
+want() {
+  mkdir -p "$STATE_DIR"
+  (
+    flock 8
+    grep -qxF "$1" "$WANTED_FILE" 2>/dev/null || echo "$1" >>"$WANTED_FILE"
+  ) 8>"$WANTED_FILE.lock"
+}
+unwant() {
+  [[ -f $WANTED_FILE ]] || return 0
+  (
+    flock 8
+    grep -vxF "$1" "$WANTED_FILE" >"$WANTED_FILE.partial" || true
+    mv "$WANTED_FILE.partial" "$WANTED_FILE"
+  ) 8>"$WANTED_FILE.lock"
+}
+
+known() {
+  local model
+  for model in "${MODELS[@]}"; do
+    [[ $(field "$model" 1) == "$1" ]] && return 0
+  done
+  echo "unknown model $1; ./llm list shows them" >&2
+  return 1
 }
 
 # The public name when there is one: it also works inside the network, and
@@ -117,7 +179,7 @@ web() {
   mkdir -p "$certs"
   running gateway || start_gateway
   remove llm-web
-  podman run -d --name llm-web --restart on-failure:3 --network host \
+  podman_run -d --name llm-web --restart on-failure:3 --network host \
     -v "$HERE/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$certs:/data" --security-opt label=disable \
     -e LLM_PUBLIC_NAME="$(<"$WEB_NAME_FILE")" \
     "$WEB_IMAGE" >/dev/null 9>&-
@@ -136,7 +198,8 @@ ensure_gateway() {
 }
 
 # The gateway listens on the network; the model servers stay on localhost,
-# so every outside request has to pass the key check.
+# so every outside request has to pass the key check. It reaches the control
+# service through the socket in CONTROL_DIR.
 # The whole folder is mounted, not single files: editors that save by replacing
 # a file would otherwise leave the container serving the old chat.html.
 start_gateway() {
@@ -145,12 +208,13 @@ start_gateway() {
     backends+=("$(field "$model" 1)=http://127.0.0.1:$(field "$model" 2)")
   done
   local IFS=,
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$STATE_DIR" "$CONTROL_DIR"
   remove llm-gateway
-  podman run -d --name llm-gateway --init --network host \
-    -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" --security-opt label=disable -w /app \
+  podman_run -d --name llm-gateway --init --restart on-failure:3 --network host \
+    -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" -v "$CONTROL_DIR:/control" \
+    --security-opt label=disable -w /app \
     -e LLM_BACKENDS="${backends[*]}" \
-    -e LLM_API_KEY="$(api_key)" \
+    -e LLM_API_KEY="$(api_key)" -e LLM_ADMIN_KEY="$(admin_key)" \
     "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
   echo "gateway and test chat on $(url)"
 }
@@ -172,8 +236,30 @@ gpu_bytes() {
   cat "$cache"
 }
 
+snapshot() {
+  local snapshots=("$HOME/.cache/huggingface/hub/models--${1//\//--}/snapshots/"*/)
+  echo "${snapshots[-1]}"
+}
+
 weights_bytes() {
-  du -sbL "$HOME/.cache/huggingface/hub/models--${1//\//--}/snapshots/"* | awk '{ sum += $1 } END { print sum }'
+  du -sbL "$(snapshot "$1")" | awk '{ print $1 }'
+}
+
+# Complete once every weight file is in the snapshot (the Hugging Face cache
+# links a file there only when it is whole). vLLM runs offline, so a model that
+# is still downloading would otherwise start, fail minutes in, and restart.
+downloaded() {
+  local snapshot
+  snapshot=$(snapshot "$1")
+  [[ -f $snapshot/config.json ]] || return 1
+  [[ -f $snapshot/model.safetensors.index.json ]] || { [[ -f $snapshot/model.safetensors ]]; return; }
+  python3 - "$snapshot" <<'PY'
+import json, sys
+from pathlib import Path
+snapshot = Path(sys.argv[1])
+shards = set(json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"].values())
+sys.exit(any(not (snapshot / shard).exists() for shard in shards))
+PY
 }
 
 # Refuse up front instead of letting vLLM fail minutes into loading: the model's
@@ -182,6 +268,10 @@ weights_bytes() {
 # (small VRAM in the BIOS), that RAM must actually be free.
 check_fits() {
   local name=$1 share=$2 repo=$3 model other used=0
+  if ! downloaded "$repo"; then
+    echo "$name is not (fully) downloaded yet; ./download.sh fetches it" >&2
+    return 1
+  fi
   for model in "${MODELS[@]}"; do
     other=$(field "$model" 1)
     if [[ $other != "$name" ]] && running "$other"; then
@@ -222,16 +312,30 @@ wait_until_ready() {
       echo "llm-$name stopped, see ./llm logs $name" >&2
       return 1
     fi
+    # vLLM failing to set up its engine (e.g. a share too small for the
+    # context, 2026-10-29) fails the same way every time, and each of the
+    # restarts meant for crashes took minutes: the one under way is the last.
+    if [[ $(podman inspect -f '{{.RestartCount}}' "llm-$name" 2>/dev/null) -gt 0 ]] &&
+       podman logs "llm-$name" 2>&1 | grep -q "Engine core initialization failed"; then
+      podman update --restart no "llm-$name" >/dev/null
+    fi
     sleep 5
   done
 }
 
+# A model that cannot start does not keep the others from starting, as at
+# boot; up still fails at the end, so a caller learns of it.
 # Models start one at a time, also across separate calls: vLLM sizes its cache
 # from the memory that is free while it starts, so a neighbour that is still
 # loading makes it see too little. Containers must not inherit the lock (9>&-),
 # or their podman monitor keeps holding it for as long as they run.
 up() {
-  local wanted=("$@") model name port
+  local wanted=("$@") model name port failed=0
+  for name in "${wanted[@]}"; do known "$name"; done
+  if [[ ${#wanted[@]} -eq 0 ]]; then
+    [[ -s $WANTED_FILE ]] && mapfile -t wanted <"$WANTED_FILE"
+    [[ ${#wanted[@]} -gt 0 ]] || echo "no models ran last time; ./llm up <name> starts one (./llm list)"
+  fi
   exec 9>"${XDG_RUNTIME_DIR:-/tmp}/local-llm.lock"
   flock 9
   podman image exists "$IMAGE" || podman build -t "$IMAGE" "$HERE"
@@ -239,43 +343,64 @@ up() {
   for model in "${MODELS[@]}"; do
     name=$(field "$model" 1)
     port=$(field "$model" 2)
-    if [[ ${#wanted[@]} -gt 0 && ! " ${wanted[*]} " =~ " $name " ]]; then
-      continue
-    fi
-    running "$name" && continue
-    check_fits "$name" "$(field "$model" 3)" "$(field "$model" 4)"
+    [[ " ${wanted[*]} " =~ " $name " ]] || continue
+    running "$name" && { want "$name"; continue; }
+    check_fits "$name" "$(field "$model" 3)" "$(field "$model" 4)" || { failed=1; continue; }
+    want "$name"
     # shellcheck disable=SC2046  # the flags column is meant to split into words
     run_container "$name" vllm serve "$(field "$model" 4)" \
       --served-model-name "$name" \
       --host 127.0.0.1 --port "$port" \
       --gpu-memory-utilization "$(field "$model" 3)" \
       $(field "$model" 5)
-    wait_until_ready "$name" "$port"
+    wait_until_ready "$name" "$port" || failed=1
   done
+  return $failed
 }
 
-# A user service, so it measures from login on whether or not models run.
-install_monitor() {
-  local unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/local-llm-monitor.service
+# User services, so they run from boot on (lingering is on, README) whether
+# or not anyone is logged in or models run.
+install_service() {
+  local name=$1 description=$2
+  local unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/local-llm-$name.service
   mkdir -p "$(dirname "$unit")"
   cat >"$unit" <<UNIT
 [Unit]
-Description=Local LLM monitor: power, energy cost and model load
+Description=$description
 
 [Service]
-ExecStart=/usr/bin/python3 $HERE/monitor.py
+ExecStart=/usr/bin/python3 $HERE/$name.py
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
 UNIT
   systemctl --user daemon-reload
-  systemctl --user enable local-llm-monitor.service
-  systemctl --user restart local-llm-monitor.service
+  systemctl --user enable "local-llm-$name.service"
+  systemctl --user restart "local-llm-$name.service"
+}
+
+install_services() {
+  install_service monitor "Local LLM monitor: power, energy cost and model load"
+  install_service control "Local LLM control: starts and stops models for the gateway, resumes them at boot"
+}
+
+# For control.py and other tools: what can run, and how much of the GPU each takes.
+config() {
+  local model sep="" ready
+  printf '{"budget": %s, "models": [' "$MEMORY_BUDGET"
+  for model in "${MODELS[@]}"; do
+    downloaded "$(field "$model" 4)" && ready=true || ready=false
+    printf '%s{"name": "%s", "port": %s, "share": %s, "repo": "%s", "downloaded": %s}' "$sep" \
+      "$(field "$model" 1)" "$(field "$model" 2)" "$(field "$model" 3)" "$(field "$model" 4)" "$ready"
+    sep=", "
+  done
+  printf ']}\n'
 }
 
 down() {
   local names
+  rm -f "$WANTED_FILE"
   names=$(podman ps -a --format '{{.Names}}' | grep '^llm-')
   [[ -z $names ]] || remove $names
 }
@@ -286,32 +411,40 @@ down() {
 main() {
   case "${1:-}" in
     up) shift; up "$@" ;;
-    stop) remove "llm-$2" ;;
+    stop) known "$2"; unwant "$2"; remove "llm-$2" ;;
     down) down ;;
     gateway) start_gateway ;;
     status)
-      curl -s "localhost:$GATEWAY_PORT/health" && echo || echo "gateway is down"
-      python3 - "$STATE_DIR/stats.json" <<'PY'
+      curl -sf "localhost:$GATEWAY_PORT/health" >/dev/null && echo "gateway is up" || echo "gateway is down"
+      systemctl --user is-active -q local-llm-control.service ||
+        echo "control service is not running, so the website cannot start models (./llm install)"
+      python3 - "$STATE_DIR/stats.json" "$(config)" <<'PY'
 import json, sys, time
 from datetime import datetime
 try:
     stats = json.load(open(sys.argv[1]))
     fresh = time.time() - datetime.fromisoformat(stats["updated"]).timestamp() < 15
 except (OSError, ValueError, KeyError):
-    fresh = False
+    stats, fresh = {}, False
 if not fresh:
-    print("monitor is not running, so problems are not checked (./llm monitor)")
-for problem in stats.get("problems", []) if fresh else []:
+    print("monitor is not running, so models and problems are not checked (./llm install)")
+    sys.exit()
+for model in json.loads(sys.argv[2])["models"]:
+    state = stats["model_states"].get(model["name"], {"state": "unknown"})
+    print(f"{model['name']}: {state['state']}")
+for problem in stats["problems"]:
     print(f"{problem['severity']}: {problem['message']}")
 PY
       ;;
     logs) podman logs -f "llm-$2" ;;
     list) for model in "${MODELS[@]}"; do echo "$(field "$model" 1) $(field "$model" 2)"; done ;;
     key) api_key ;;
+    admin-key) admin_key ;;
     url) url ;;
     web) shift; web "$@" ;;
-    monitor) install_monitor ;;
-    *) sed -n '2,15p' "$0"; exit 1 ;;
+    install) install_services ;;
+    config) config ;;
+    *) sed -n '2,19p' "$0"; exit 1 ;;
   esac
 }
 

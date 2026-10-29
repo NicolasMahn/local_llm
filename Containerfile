@@ -13,6 +13,12 @@ RUN curl -fsSL "https://github.com/ROCm/aotriton/releases/download/${AOTRITON}/a
 # for Gemma 4 (README, "Notes"). The patch gives Qwen larger kernel tiles; it
 # fails the build if vLLM's code moved, rather than leaving the slow kernel in
 # place.
+# Audio decoding for Gemma 4 12B, which hears: vLLM has the model code but
+# not the libraries that read WAV/FLAC (soundfile) and MP3/M4A/WebM (av), so
+# every audio request failed. Not "vllm[audio]", which can replace the Strix
+# build of vLLM from PyPI. The import fails the build rather than the requests.
+RUN pip install --no-cache-dir soundfile av && python3 -c "import soundfile, av"
+
 COPY vllm_plugins /opt/local-llm-plugins
 RUN pip install --no-cache-dir --no-deps --no-build-isolation /opt/local-llm-plugins \
  && git -C /opt/venv/lib/python3.12/site-packages apply /opt/local-llm-plugins/prefill-tiles.patch

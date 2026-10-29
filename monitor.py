@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Measures the machine and the models every few seconds, for the panel and the chat page.
 
-Runs as a user service from login on (./llm monitor installs it) and writes one
-JSON snapshot that both read. Energy and cost count from the last reboot: the
-totals are saved with the boot's id, so a restarted monitor carries on and a
-reboot starts from zero. Time before login, or while the monitor is stopped,
-is not counted.
+Runs as a user service from boot on (./llm install installs it) and writes one
+JSON snapshot that both read. Energy and cost are kept per day in energy.json,
+across reboots; the snapshot also has this boot's share. Time while the monitor
+is stopped, or the computer off, is not counted.
 
 Energy comes from the chip's RAPL package counter (CPU, GPU and memory
 controller together), which misses nothing between samples; it has to be made
@@ -21,7 +20,7 @@ import struct
 import subprocess
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from health import Health
@@ -33,6 +32,8 @@ HISTORY = 300  # samples kept for the graphs: ten minutes
 HERE = Path(__file__).resolve().parent
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "local-llm"
 STATS = STATE / "stats.json"
+LEDGER = STATE / "energy.json"
+DAYS_SHOWN = 30  # daily totals in the snapshot, for the page's chart
 GATEWAY = "http://127.0.0.1:8400"
 # The package domain. The "core" domain next to it counts CPU 0 only on AMD.
 RAPL = Path("/sys/class/powercap/intel-rapl:0")
@@ -175,6 +176,40 @@ def household_ct(market_ct):
     return (market_ct + sum(SURCHARGES_CT.values())) * VAT
 
 
+class Ledger:
+    """Energy and cost per day, kept across reboots: what the bill sees.
+
+    Days are local dates. The file is rewritten every sample, so a crash or a
+    power cut loses at most one sample.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            self.days = json.loads(path.read_text())["days"]
+        except (OSError, ValueError, KeyError):
+            self.days = {}
+
+    def add(self, day, kwh, eur):
+        entry = self.days.setdefault(day, {"kwh": 0.0, "eur": 0.0})
+        entry["kwh"] += kwh
+        entry["eur"] += eur
+
+    def save(self):
+        partial = self.path.with_suffix(".partial")
+        partial.write_text(json.dumps({"days": self.days}))
+        os.replace(partial, self.path)
+
+    def summary(self):
+        days = sorted(self.days)
+        return {
+            "since": days[0] if days else None,
+            "kwh": sum(entry["kwh"] for entry in self.days.values()),
+            "eur": sum(entry["eur"] for entry in self.days.values()),
+            "days": [{"day": day, **self.days[day]} for day in days[-DAYS_SHOWN:]],
+        }
+
+
 class Monitor:
     def __init__(self):
         self.device, self.hwmon = find_gpu()
@@ -190,6 +225,10 @@ class Monitor:
         STATE.mkdir(parents=True, exist_ok=True)
         self.health = Health(STATE)
         self._resume()
+        self.ledger = Ledger(LEDGER)
+        # The first ledger starts with what this boot counted before it existed.
+        if not LEDGER.exists() and self.energy_j:
+            self.ledger.add(date.today().isoformat(), self.energy_j / 3.6e6, self.cost_eur)
 
     def _resume(self):
         try:
@@ -228,8 +267,10 @@ class Monitor:
             parts = None
 
         self.energy_j += joules
-        if price is not None:
-            self.cost_eur += joules / 3.6e6 * price / 100
+        cost = joules / 3.6e6 * price / 100 if price is not None else 0.0
+        self.cost_eur += cost
+        self.ledger.add(date.today().isoformat(), joules / 3.6e6, cost)
+        self.ledger.save()
 
         model_stats, total_rate, total_requests = {}, 0.0, 0
         for name, port in self.models.items():
@@ -304,6 +345,7 @@ class Monitor:
             "power_parts_w": {k: round(v, 1) for k, v in parts.items()} if parts else None,
             "energy_kwh": self.energy_j / 3.6e6,
             "cost_eur": self.cost_eur,
+            "energy_ledger": self.ledger.summary(),
             "market_ct_per_kwh": market,
             "price_ct_per_kwh": price,
             "gpu_busy": gpu_busy,

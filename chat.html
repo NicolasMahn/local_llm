@@ -17,6 +17,7 @@
     --on-accent: #ffffff;
     --error: #c01c28;
     --warning: #9c6e03;
+    --ok: #26a269;
     --user-bubble: color-mix(in srgb, var(--accent) 14%, var(--surface));
     --code: color-mix(in srgb, var(--text) 6%, var(--background));
     --chart: #3584e4; /* data marks; checked for contrast against --background */
@@ -41,6 +42,7 @@
       --on-accent: #10233b;
       --error: #ff7b63;
       --warning: #f8c34a;
+      --ok: #5fd38d;
       --chart: #4f8fe0;
       --part-gpu: #3987e5;
       --part-cpu: #d95926;
@@ -73,12 +75,14 @@
   header .column { display: flex; align-items: center; justify-content: space-between; height: 56px; }
 
   .picker { position: relative; display: inline-flex; align-items: center; }
-  .picker select {
+  .picker select, #start-model {
     appearance: none; border: none; background: transparent;
     font-weight: 600; padding: 6px 30px 6px 10px; margin-left: -10px;
     border-radius: 10px;
   }
-  .picker select:hover, .picker select:focus-visible { background: var(--surface); outline: none; }
+  #start-model { padding-right: 10px; color: var(--accent); }
+  .picker select:hover, .picker select:focus-visible,
+  #start-model:hover, #start-model:focus-visible { background: var(--surface); outline: none; }
   .picker svg { position: absolute; right: 8px; width: 16px; height: 16px; pointer-events: none; color: var(--muted); }
 
   .icon-button {
@@ -87,7 +91,7 @@
   }
   .icon-button:hover, .icon-button:focus-visible { background: var(--surface); color: var(--text); outline: none; }
 
-  .actions { display: flex; gap: 4px; }
+  .actions { display: flex; gap: 4px; margin-left: auto; }
   .icon-button.active { background: var(--surface); color: var(--text); }
 
   main { flex: 1; overflow-y: auto; }
@@ -109,6 +113,8 @@
   .chart .area { fill: var(--chart-wash); }
   .chart .line { fill: none; stroke: var(--chart); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .chart .end { fill: var(--chart); stroke: var(--background); stroke-width: 2; }
+  .chart .bar { fill: var(--chart); }
+  .chart .bar.dim { fill: var(--chart-wash); }
   .chart .crosshair { stroke: var(--muted); stroke-width: 1; }
   .chart .band { fill-opacity: 0.6; }
   .chart .gap { fill: none; stroke: var(--background); stroke-width: 2; }
@@ -125,7 +131,7 @@
     padding: 4px 8px; font-size: 13px;
   }
   .tooltip span { color: var(--muted); margin-left: 6px; }
-  #stats-note { color: var(--muted); font-size: 13px; margin: 0; }
+  #stats-note, #models-note { color: var(--muted); font-size: 13px; margin: 0; }
   #problems { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
   #problems li { display: flex; gap: 10px; align-items: baseline; font-size: 14px; }
   #problems li::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; }
@@ -137,6 +143,26 @@
   }
   #stats-button.warning::after { background: var(--warning); }
   #stats-button.error::after { background: var(--error); }
+
+  /* Models: each one's state and what can be done with it now. */
+  #models { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; padding-bottom: 24px; }
+  .model { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px; padding: 8px 6px 8px 12px; }
+  .model + .model { border-top: 1px solid var(--border); }
+  .model strong { font-weight: 600; overflow-wrap: anywhere; }
+  .model p { margin: 0; font-size: 14px; color: var(--muted); }
+  .model .state { display: flex; align-items: center; gap: 8px; }
+  .model .state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .model.live .state::before { background: var(--ok); }
+  .model.starting .state::before, .model.busy .state::before { background: var(--accent); }
+  .model.failed .state::before { background: var(--error); }
+  .model .problem { grid-column: 1 / -1; color: var(--error); overflow-wrap: anywhere; }
+  .model-actions { grid-column: 2; grid-row: 1 / 3; display: flex; gap: 6px; }
+  .model-actions button {
+    border: none; border-radius: 10px; background: var(--background);
+    padding: 6px 14px; font-size: 14px; font-weight: 600;
+  }
+  .model-actions button:hover, .model-actions button:focus-visible { background: var(--border); outline: none; }
+  .model-actions button:disabled { color: var(--muted); cursor: default; }
   #messages { display: flex; flex-direction: column; gap: 20px; padding-top: 12px; padding-bottom: 24px; }
 
   /* Empty state: the way in (key) and the way out (API addresses). */
@@ -152,11 +178,11 @@
     .endpoint code { grid-row: 2; }
     .endpoint button { grid-column: 2; grid-row: 1 / 3; }
   }
-  #key-form { display: flex; gap: 8px; padding: 6px; }
-  #key-form input { flex: 1; min-width: 0; border: none; background: transparent; padding: 8px 10px; outline: none; font-family: var(--mono); font-size: 14px; }
-  #key-form.rejected { box-shadow: inset 0 0 0 1px var(--error); }
-  #key-error { color: var(--error); font-size: 14px; margin: -8px 0 0 12px; }
-  #key-form button, .send {
+  .key-form { display: flex; gap: 8px; padding: 6px; }
+  .key-form input { flex: 1; min-width: 0; border: none; background: transparent; padding: 8px 10px; outline: none; font-family: var(--mono); font-size: 14px; }
+  .key-form.rejected { box-shadow: inset 0 0 0 1px var(--error); }
+  .key-error { color: var(--error); font-size: 14px; margin: -8px 0 0 12px; }
+  .key-form button, .send {
     border: none; border-radius: 10px; background: var(--accent); color: var(--on-accent);
     padding: 8px 16px; font-weight: 600;
   }
@@ -211,8 +237,14 @@
     background: color-mix(in srgb, var(--background) 80%, transparent); color: var(--text);
   }
   .chip button svg { width: 12px; height: 12px; }
+  .chip.audio {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; padding-top: 12px;
+    color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  .chip.recording, #record.recording { color: var(--error); }
   .user .media { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .user .media img, .user .media video { max-height: 160px; max-width: 100%; border-radius: 10px; }
+  .user .media audio { max-width: 100%; }
 
   #toast {
     position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom)); transform: translateX(-50%);
@@ -229,7 +261,11 @@
       <select id="model" aria-label="Model"></select>
       <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
     </label>
+    <button id="start-model" hidden>Start a model</button>
     <div class="actions">
+      <button id="models-button" class="icon-button" title="Models" aria-label="Models" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+      </button>
       <button id="stats-button" class="icon-button" title="Power and load" aria-label="Power and load" hidden>
         <svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 16v-5"/><path d="M11 16V6"/><path d="M16 16v-8"/></svg>
       </button>
@@ -242,11 +278,11 @@
 
 <main id="scroller">
   <div class="column" id="welcome">
-    <form id="key-form" class="card">
+    <form id="key-form" class="card key-form">
       <input id="key" type="password" placeholder="API key, from ./llm key" autocomplete="off" aria-label="API key">
       <button>Save</button>
     </form>
-    <p id="key-error" hidden>This key was not accepted.</p>
+    <p id="key-error" class="key-error" hidden>This key was not accepted.</p>
     <div class="card" id="endpoints"></div>
   </div>
   <div class="column" id="messages" hidden></div>
@@ -256,17 +292,26 @@
     <div id="charts"></div>
     <p id="stats-note"></p>
   </div>
+  <div class="column" id="models" hidden>
+    <form id="admin-form" class="card key-form" hidden>
+      <input id="admin-key" type="password" placeholder="Admin key, from ./llm admin-key" autocomplete="off" aria-label="Admin key">
+      <button>Save</button>
+    </form>
+    <p id="admin-error" class="key-error" hidden>This key was not accepted.</p>
+    <div class="card" id="model-list" hidden></div>
+    <p id="models-note" hidden></p>
+  </div>
 </main>
 
 <footer>
   <div class="column">
     <div id="pending" hidden></div>
     <form id="composer">
-      <button type="button" id="attach" class="icon-button" title="Attach a picture or video" aria-label="Attach">
+      <button type="button" id="attach" class="icon-button" title="Attach pictures, videos or audio" aria-label="Attach">
         <svg viewBox="0 0 24 24"><path d="m21 12-8.6 8.6a5 5 0 0 1-7-7l8.5-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.3-2.4l7.9-7.9"/></svg>
       </button>
-      <input type="file" id="file" multiple hidden
-             accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm">
+      <input type="file" id="file" multiple hidden>
+      <button type="button" id="record" class="icon-button" hidden></button>
       <textarea id="prompt" rows="1" placeholder="Message" aria-label="Message"></textarea>
       <button id="send" class="send" aria-label="Send" disabled></button>
     </form>
@@ -281,20 +326,36 @@
   <svg data-name="copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
   <svg data-name="done" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></svg>
   <svg data-name="close" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+  <svg data-name="mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
+  <svg data-name="audio" viewBox="0 0 24 24"><path d="M3 10v4"/><path d="M7.5 6v12"/><path d="M12 3v18"/><path d="M16.5 8v8"/><path d="M21 10v4"/></svg>
 </template>
 
 <script>
   const $ = id => document.getElementById(id);
   const icon = name => $("icons").content.querySelector(`[data-name=${name}]`).cloneNode(true);
-  // Only these models can look at pictures and videos (vLLM loads their vision part).
-  const VISION_MODELS = ["gemma-4-26b"];
+  // What each model takes besides text (the parts of it vLLM loads); any other reads text only.
+  const MODEL_INPUTS = {
+    "gemma-4-26b": ["image", "video"],
+    "gemma-4-12b": ["image", "video", "audio"],
+    "gemma-4-31b": ["image", "video"],
+    "muse-glimmer-30b": ["image", "video"],
+  };
+  const inputs = model => MODEL_INPUTS[model] ?? [];
+  const NOUNS = {image: "pictures", video: "videos", audio: "audio"};
+  const cannotTake = (model, kind) => `${model} cannot take ${NOUNS[kind]}; ` +
+    `${Object.keys(MODEL_INPUTS).filter(other => inputs(other).includes(kind)).join(", ")} can`;
   // The formats Gemma was tested with; everything else is turned away.
   const MEDIA_TYPES = {
     "image/png": "image", "image/jpeg": "image", "image/webp": "image", "image/gif": "image",
     "video/mp4": "video", "video/webm": "video",
+    "audio/wav": "audio", "audio/x-wav": "audio", "audio/wave": "audio", "audio/mpeg": "audio",
+    "audio/mp4": "audio", "audio/x-m4a": "audio", "audio/ogg": "audio", "audio/webm": "audio",
+    "audio/flac": "audio",
   };
   const LARGEST_ATTACHMENT = 50 * 1024 ** 2;
-  let pending = []; // attachments for the next message: {kind, name, url}
+  // vLLM silently cuts every clip after this many seconds.
+  const LONGEST_AUDIO = 30;
+  let pending = []; // attachments for the next message: {kind, name, url, seconds?}
 
   // A link like /#api=sk-… (the panel copies one) saves the key, then drops it
   // from the address bar so it does not linger on screen. It sits after the #
@@ -366,6 +427,7 @@
 
   // The key box only shows until a key works; a rejected key brings it back.
   function showWelcome(needsKey) {
+    if (view) setView(null);
     $("welcome").hidden = false;
     $("messages").hidden = true;
     $("new-chat").hidden = true;
@@ -376,9 +438,15 @@
     $("key-form").classList.toggle("rejected", rejected);
     $("key-error").hidden = !rejected;
     $("composer").parentElement.hidden = needsKey;
-    $("model").parentElement.hidden = needsKey;
-    $("stats-button").hidden = needsKey;
+    showPicker(!needsKey);
+    $("stats-button").hidden = $("models-button").hidden = needsKey;
     (needsKey ? $("key") : $("prompt")).focus();
+  }
+
+  // With nothing running, the picker's place leads to the model controls instead.
+  function showPicker(visible) {
+    $("model").parentElement.hidden = !visible || $("model").disabled;
+    $("start-model").hidden = !visible || !$("model").disabled;
   }
 
   // Everything a client needs; the key joins the addresses once it is known to work.
@@ -429,8 +497,10 @@
     select.disabled = !names.length;
     const last = localStorage.getItem("llm-model");
     if (names.includes(last)) select.value = last;
-    if (!turns.length) showWelcome(false);
+    if (!turns.length && !view) showWelcome(false);
+    else showPicker(true);
     updateSend();
+    updateRecord();
     checkProblems();
   }
 
@@ -460,21 +530,35 @@
   const plainText = content => typeof content === "string" ? content
     : content.filter(part => part.type === "text").map(part => part.text).join(" ");
 
-  // The conversation as a model can take it: pictures and videos only for vision models.
-  const forModel = (model, messages) => VISION_MODELS.includes(model) ? messages
-    : messages.map(message => typeof message.content === "string" ? message : {
-        ...message, content: `${plainText(message.content)} [an attachment only a vision model can see]`,
-      });
+  const kindOf = part => part.type.replace(/_url$/, "");
+
+  // The conversation as a model can take it: a chat may switch models, so
+  // attachments an earlier model took are left out, with a note in their place.
+  const forModel = (model, messages) => messages.map(message => {
+    if (typeof message.content === "string") return message;
+    const takes = part => part.type === "text" || inputs(model).includes(kindOf(part));
+    const dropped = [...new Set(message.content.filter(part => !takes(part)).map(kindOf))];
+    if (!dropped.length) return message;
+    const note = `[attached ${dropped.join(" and ")} this model cannot take]`;
+    const kept = message.content.filter(takes);
+    return {...message, content: kept.some(part => part.type !== "text")
+      ? [...kept, {type: "text", text: note}] : `${plainText(kept)} ${note}`.trim()};
+  });
+
+  // Why the pending attachments cannot go to this model, if they cannot.
+  const refusal = model => {
+    const kind = pending.map(a => a.kind).find(kind => !inputs(model).includes(kind));
+    return kind && cannotTake(model, kind);
+  };
 
   async function send(text) {
     const model = $("model").value;
-    if (pending.length && !VISION_MODELS.includes(model)) {
-      toast(`${model} cannot see attachments; pick ${VISION_MODELS.join(", ")}`);
-      return null;
-    }
+    // Google's advice for Gemma: pictures and videos before the words, audio after them.
+    const part = ({kind, url}) => ({type: `${kind}_url`, [`${kind}_url`]: {url}});
     const content = !pending.length ? text : [
+      ...pending.filter(a => a.kind !== "audio").map(part),
       ...(text ? [{type: "text", text}] : []),
-      ...pending.map(({kind, url}) => ({type: `${kind}_url`, [`${kind}_url`]: {url}})),
+      ...pending.filter(a => a.kind === "audio").map(part),
     ];
     const bubble = addMessage("user");
     if (pending.length) {
@@ -554,23 +638,41 @@
   }
 
   function mediaElement({kind, url, name}) {
-    const element = document.createElement(kind === "video" ? "video" : "img");
-    Object.assign(element, {src: url, title: name, alt: name});
+    const element = document.createElement({image: "img", video: "video", audio: "audio"}[kind]);
+    Object.assign(element, {src: url, title: name});
+    if (kind === "image") element.alt = name;
     if (kind === "video") Object.assign(element, {muted: true, controls: true, preload: "metadata"});
+    if (kind === "audio") Object.assign(element, {controls: true, preload: "metadata"});
     return element;
   }
 
+  const clock = seconds => {
+    const whole = Math.round(seconds);
+    return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+  };
+
+  // Sound has no picture: its chip shows a symbol and how long it is.
+  function audioChip(seconds, recording = false) {
+    const chip = Object.assign(document.createElement("div"), {className: `chip audio${recording ? " recording" : ""}`});
+    chip.append(icon(recording ? "mic" : "audio"),
+      Object.assign(document.createElement("span"), {textContent: Number.isFinite(seconds) ? clock(seconds) : ""}));
+    return chip;
+  }
+
   function renderPending() {
-    $("pending").hidden = !pending.length;
+    $("pending").hidden = !pending.length && !recording;
     $("pending").replaceChildren(...pending.map(attachment => {
-      const chip = Object.assign(document.createElement("div"), {className: "chip"});
+      const chip = attachment.kind === "audio" ? audioChip(attachment.seconds)
+        : Object.assign(document.createElement("div"), {className: "chip"});
+      chip.title = attachment.name;
       const remove = Object.assign(document.createElement("button"),
         {type: "button", title: "Remove", ariaLabel: `Remove ${attachment.name}`});
       remove.append(icon("close"));
       remove.onclick = () => { pending = pending.filter(a => a !== attachment); renderPending(); updateSend(); };
-      chip.append(mediaElement(attachment), remove);
+      if (attachment.kind !== "audio") chip.append(mediaElement(attachment));
+      chip.append(remove);
       return chip;
-    }));
+    }), ...(recording ? [recording.chip] : []));
   }
 
   const readAsDataUrl = file => new Promise((resolve, reject) => {
@@ -580,18 +682,271 @@
     reader.readAsDataURL(file);
   });
 
+  // How long a clip or video is (NaN when this browser cannot play it), and whether it has no picture.
+  const probe = file => new Promise(resolve => {
+    const media = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    const done = seconds => {
+      URL.revokeObjectURL(url);
+      resolve({seconds, soundOnly: media.readyState > 0 && !media.videoWidth});
+    };
+    media.onerror = () => done(NaN);
+    media.onloadedmetadata = () => {
+      if (media.duration !== Infinity) return done(media.duration);
+      // Recordings from Chrome have no length in their header; seeking to
+      // the end makes it read the clip through and find out.
+      media.ondurationchange = () => done(media.duration);
+      media.currentTime = 1e9;
+    };
+    setTimeout(() => done(NaN), 5000);
+    media.preload = "metadata";
+    media.src = url;
+  });
+
   async function addFiles(files) {
+    const model = $("model").value;
     for (const file of files) {
-      if (!MEDIA_TYPES[file.type]) {
-        toast(`${file.name}: only PNG, JPEG, WebP, GIF, MP4 or WebM`);
-      } else if (file.size > LARGEST_ATTACHMENT) {
+      let kind = MEDIA_TYPES[file.type], data = file, seconds;
+      if (!kind) {
+        toast(`${file.name}: only PNG, JPEG, WebP, GIF, MP4, WebM, or WAV, MP3, M4A, Ogg, FLAC audio`);
+        continue;
+      }
+      if (file.size > LARGEST_ATTACHMENT) {
         toast(`${file.name} is larger than ${LARGEST_ATTACHMENT / 1024 ** 2} MB`);
+        continue;
+      }
+      if (kind !== "image") {
+        const media = await probe(file);
+        seconds = media.seconds;
+        // Browsers call every .webm and .mp4 a video, also those with sound only.
+        if (kind === "video" && media.soundOnly) {
+          kind = "audio";
+          data = file.slice(0, file.size, file.type.replace("video/", "audio/"));
+        }
+      }
+      if (!inputs(model).includes(kind)) {
+        toast(cannotTake(model, kind));
+      } else if (kind === "audio" && seconds > LONGEST_AUDIO) {
+        toast(`${file.name} is ${clock(seconds)} long; ${model} hears ${LONGEST_AUDIO} s of a clip at most`);
       } else {
-        pending.push({kind: MEDIA_TYPES[file.type], name: file.name, url: await readAsDataUrl(file)});
+        if (kind === "audio" && Number.isNaN(seconds))
+          toast(`This browser cannot tell how long ${file.name} is; ${model} hears its first ${LONGEST_AUDIO} s`);
+        pending.push({kind, name: file.name, url: await readAsDataUrl(data), ...(kind === "audio" && {seconds})});
       }
     }
     renderPending();
     updateSend();
+  }
+
+  // --- Recording: the microphone only works on HTTPS (or localhost), so the
+  // button only shows there, and only for models that hear.
+
+  const canRecord = Boolean(window.isSecureContext && navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+  let recording = null; // {recorder, chip} while the microphone is on
+
+  function updateRecord() {
+    const button = $("record");
+    button.hidden = !canRecord || (!recording && !inputs($("model").value).includes("audio"));
+    button.classList.toggle("recording", Boolean(recording));
+    button.replaceChildren(icon(recording ? "stop" : "mic"));
+    button.title = button.ariaLabel = recording ? "Stop recording" : `Record up to ${LONGEST_AUDIO} s`;
+  }
+
+  async function record() {
+    if (recording) return recording.recorder.stop();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    } catch (error) {
+      return toast(`No microphone: ${error.message}`);
+    }
+    // Chrome and Firefox record WebM with Opus; Safari only MP4.
+    const mimeType = ["audio/webm;codecs=opus", "audio/mp4"].find(type => MediaRecorder.isTypeSupported(type));
+    const recorder = new MediaRecorder(stream, mimeType ? {mimeType} : {});
+    const chunks = [], started = performance.now();
+    const seconds = () => Math.min((performance.now() - started) / 1000, LONGEST_AUDIO);
+    const chip = audioChip(0, true);
+    const ticker = setInterval(() => { chip.lastChild.textContent = clock(seconds()); }, 250);
+    const limit = setTimeout(() => recorder.stop(), LONGEST_AUDIO * 1000);
+    recorder.ondataavailable = event => chunks.push(event.data);
+    recorder.onstop = async () => {
+      clearInterval(ticker);
+      clearTimeout(limit);
+      stream.getTracks().forEach(track => track.stop());
+      const length = seconds();
+      // The codec suffix would end up inside the data: URL's type.
+      const blob = new Blob(chunks, {type: recorder.mimeType.split(";")[0] || "audio/webm"});
+      pending.push({kind: "audio", name: `Recording, ${clock(length)}`, url: await readAsDataUrl(blob), seconds: length});
+      recording = null;
+      renderPending();
+      updateRecord();
+      updateSend();
+    };
+    recorder.start();
+    recording = {recorder, chip};
+    renderPending();
+    updateRecord();
+  }
+
+  // --- Views that take the chat's place while open, refreshed as long as they show.
+
+  let view = null; // "stats", "models" or null for the chat
+  let viewTimer = null;
+
+  function setView(name) {
+    if (view) {
+      $(view).hidden = true;
+      $(`${view}-button`).classList.remove("active");
+      clearInterval(viewTimer);
+    }
+    view = name;
+    $("composer").parentElement.hidden = Boolean(view);
+    if (!view) return;
+    $(view).hidden = false;
+    $(`${view}-button`).classList.add("active");
+    $("welcome").hidden = $("messages").hidden = true;
+    if (view === "stats") {
+      loadStats();
+      viewTimer = setInterval(loadStats, 2000);
+    } else {
+      loadAdmin();
+      viewTimer = setInterval(pollAdmin, 3000);
+    }
+  }
+
+  function toggleView(name) {
+    const closing = view === name;
+    setView(closing ? null : name);
+    if (!closing) return;
+    if (turns.length) $("messages").hidden = false;
+    else showWelcome(false);
+    if (name === "models") loadModels();
+  }
+
+  // --- Models: started, stopped and restarted by control.py, behind the admin key.
+
+  let adminKey = localStorage.getItem("llm-admin-key") || "";
+  let shownModels = null; // what the list shows, so polling only redraws on a change
+  let liveModels = null; // names live at the last look, to notice the picker is out of date
+
+  // The admin key is accepted everywhere, so the main key may be it; null when neither may.
+  // Never over plain HTTP, where anyone in the network could read the key on its
+  // way (the gateway takes it only through HTTPS or from this computer anyway).
+  async function admin(path, method = "GET") {
+    if (!window.isSecureContext) throw new Error("Models start and stop over the HTTPS address only (./llm url).");
+    for (const candidate of new Set([adminKey, key].filter(Boolean))) {
+      const response = await fetch(`/admin/${path}`, {method, headers: {authorization: `Bearer ${candidate}`}});
+      if (response.status !== 401 && response.status !== 403) return response;
+    }
+    return null;
+  }
+
+  function askForAdminKey() {
+    const asking = !$("admin-form").hidden;
+    $("admin-form").hidden = false;
+    $("model-list").hidden = $("models-note").hidden = true;
+    $("admin-form").classList.toggle("rejected", Boolean(adminKey));
+    $("admin-error").hidden = !adminKey;
+    $("admin-key").value = adminKey;
+    if (!asking) $("admin-key").focus();
+  }
+
+  async function loadAdmin() {
+    try {
+      const response = await admin("models");
+      if (!response) return askForAdminKey();
+      $("admin-form").hidden = $("admin-error").hidden = true;
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message ?? response.statusText);
+      showModels(body);
+    } catch (error) {
+      $("models-note").hidden = false;
+      $("models-note").textContent = error.message;
+    }
+  }
+
+  // While the key box waits for a new key, asking again would only be refused again.
+  const pollAdmin = () => $("admin-form").hidden && loadAdmin();
+
+  const minutesSince = time => Math.floor((Date.now() - Date.parse(time)) / 60000);
+  const forMinutes = time => time && minutesSince(time) >= 1 ? ` for ${minutesSince(time)} min` : "";
+  const DOING = {start: "starting", stop: "stopping", restart: "restarting"};
+
+  // A model as the list shows it: the state's colour, words, problems, and what can be done.
+  function describe(model) {
+    const problems = [];
+    if (model.state === "failed" && !model.job) problems.push(model.reason);
+    if (model.failed_job) problems.push(`Could not ${model.failed_job.action}: ${model.failed_job.message}`);
+    const shown = {name: model.name, state: model.state, problems, waiting: false, actions: []};
+    if (model.job) {
+      Object.assign(shown, {state: "busy", waiting: true, actions: model.job.action === "stop" ? [] : ["stop"],
+        words: DOING[model.job.action] + forMinutes(model.state === "starting" ? model.started : model.job.since)});
+    } else if (!model.downloaded) {
+      Object.assign(shown, {state: "off", words: "not downloaded"});
+    } else if (model.state === "live") {
+      Object.assign(shown, {words: "live", actions: ["restart", "stop"]});
+    } else if (model.state === "starting") {
+      Object.assign(shown, {words: `starting${forMinutes(model.started)}`, waiting: true, actions: ["stop"]});
+    } else if (model.state === "failed") {
+      Object.assign(shown, {words: "failed", actions: ["restart", "stop"]});
+    } else {
+      Object.assign(shown, {words: model.state, actions: ["start"]});
+    }
+    return shown;
+  }
+
+  function showModels({models, monitor}) {
+    $("model-list").hidden = false;
+    $("models-note").hidden = monitor;
+    $("models-note").textContent = monitor ? "" : "The monitor is not running, so what runs is unknown; see ./llm install";
+
+    const live = models.filter(model => model.state === "live").map(model => model.name).join(" ");
+    if (liveModels !== null && live !== liveModels) loadModels();
+    liveModels = live;
+
+    const rows = models.map(describe);
+    if (JSON.stringify(rows) === shownModels) return;
+    shownModels = JSON.stringify(rows);
+    $("model-list").replaceChildren(...rows.map(shown => {
+      const row = Object.assign(document.createElement("div"), {className: `model ${shown.state}`});
+      const state = Object.assign(document.createElement("p"), {className: "state", textContent: shown.words});
+      if (shown.waiting) state.append(Object.assign(document.createElement("span"),
+        {className: "dots", innerHTML: "<i></i><i></i><i></i>"}));
+      const actions = Object.assign(document.createElement("div"), {className: "model-actions"});
+      actions.append(...shown.actions.map(action => {
+        const button = Object.assign(document.createElement("button"),
+          {type: "button", textContent: action[0].toUpperCase() + action.slice(1)});
+        button.onclick = () => act(shown.name, action, button);
+        return button;
+      }));
+      row.append(Object.assign(document.createElement("strong"), {textContent: shown.name}), actions, state,
+        ...shown.problems.map(text => Object.assign(document.createElement("p"), {className: "problem", textContent: text})));
+      return row;
+    }));
+  }
+
+  async function act(name, action, button) {
+    button.disabled = true;
+    try {
+      let response = await admin(`models/${name}/${action}`, "POST");
+      if (!response) return;
+      let body = await response.json();
+      // Too little GPU memory: the server names the models to stop, and asks again with replace.
+      const wouldStop = body.error?.would_stop;
+      if (response.status === 409 && wouldStop?.length) {
+        const doing = DOING[action][0].toUpperCase() + DOING[action].slice(1);
+        if (!confirm(`${doing} ${name} stops ${wouldStop.join(", ")}. Continue?`)) return;
+        response = await admin(`models/${name}/${action}?replace=true`, "POST");
+        if (!response) return;
+        body = await response.json();
+      }
+      if (!response.ok) toast(body.error?.message ?? response.statusText);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      shownModels = null;
+      loadAdmin();
+    }
   }
 
   // --- Measurements: what monitor.py samples, fetched while this view is open.
@@ -614,23 +969,6 @@
   ];
   const hover = {}; // chart key -> pointer x, so a refresh keeps the crosshair
   let lastStats = null;
-  let statsTimer = null;
-
-  function toggleStats() {
-    const open = $("stats").hidden;
-    $("stats").hidden = !open;
-    $("stats-button").classList.toggle("active", open);
-    $("composer").parentElement.hidden = open;
-    if (open) {
-      $("welcome").hidden = $("messages").hidden = true;
-      loadStats();
-      statsTimer = setInterval(loadStats, 2000);
-    } else {
-      clearInterval(statsTimer);
-      if (turns.length) $("messages").hidden = false;
-      else showWelcome(false);
-    }
-  }
 
   async function loadStats() {
     try {
@@ -661,7 +999,7 @@
 
   // Problems are worth knowing about without opening the view, so check now and then.
   async function checkProblems() {
-    if (!key || !$("stats").hidden) return;
+    if (!key || view === "stats") return;
     try {
       const response = await fetch("/stats", {headers: {authorization: `Bearer ${key}`}});
       if (response.ok) showProblems((await response.json()).problems ?? []);
@@ -674,9 +1012,10 @@
   function renderStats(s) {
     showProblems(s.problems ?? []);
     const price = s.price_ct_per_kwh;
+    const ledger = s.energy_ledger;
     const tiles = [
-      ["Energy since boot", energy(s.energy_kwh)],
-      ["Cost since boot", price === null ? "–" : cost(s.cost_eur)],
+      ["Energy, all time", ledger ? energy(ledger.kwh) : "–"],
+      ["Cost, all time", ledger ? cost(ledger.eur) : "–"],
       ["Price now", price === null ? "–" : `${Math.round(price)} ct/kWh`],
       ["Memory used", `${Math.round(s.all_memory.gpu_gb + s.all_memory.other_gb)} / ${Math.round(s.all_memory.total_gb)} GB`],
     ];
@@ -698,15 +1037,16 @@
         chart.innerHTML = `<div class="chart-head"><span>${spec.title}</span><span></span></div>` +
           `<div class="legend" hidden></div><svg></svg>`;
         const svg = chart.querySelector("svg");
-        svg.addEventListener("pointermove", e => { hover[spec.key] = e.offsetX; drawChart(spec, lastStats); });
+        svg.addEventListener("pointermove", e => { hover[spec.key] = pointerX(e, svg); drawChart(spec, lastStats); });
         svg.addEventListener("pointerleave", () => { delete hover[spec.key]; drawChart(spec, lastStats); });
         return chart;
-      }));
+      }), daysChart());
     }
     CHARTS.forEach(spec => drawChart(spec, s));
+    drawDays(s);
 
-    const since = new Date(s.counting_since).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
-    $("stats-note").textContent = `Counted since ${since}; the monitor starts at login. ` +
+    const since = ledger?.since ? dayDate(ledger.since).toLocaleDateString(undefined, {dateStyle: "medium"}) : "now";
+    $("stats-note").textContent = `Counted since ${since}, while the computer runs. ` +
       `Chip power only, from its ${s.power_source}; the whole computer draws more at the wall. ` +
       (price === null ? "No market price yet."
         : `Price: German market price now (${s.market_ct_per_kwh.toFixed(1)} ct) plus Esslingen grid fee, levies, taxes and VAT.`);
@@ -750,7 +1090,8 @@
                 `<circle class="end" cx="${cx}" cy="${y(values[i])}" r="4"/>`;
       // Samples from before the monitor could split have only the total.
       const split = parts?.map(part => ({...part, value: s.history[part.key][i]}));
-      showTooltip(chart, cx, values[i], spec.unit, times[i], split?.some(part => part.value) ? split : null);
+      showTooltip(chart, cx, `${Math.round(values[i] * 10) / 10}${spec.unit ? ` ${spec.unit}` : ""}`,
+                  new Date(times[i] * 1000).toLocaleTimeString(), split?.some(part => part.value) ? split : null, spec.unit);
     } else {
       chart.querySelector(".tooltip")?.remove();
     }
@@ -769,6 +1110,62 @@
       (points.length && hover[spec.key] === undefined
         ? `<circle class="end" cx="${x(end)}" cy="${y(current)}" r="4"/>` : "") +
       overlay +
+      `<rect x="${left}" y="0" width="${plotW}" height="${height}" fill="transparent"/>`;
+  }
+
+  // offsetX is not measured from the chart's edge when the pointer is over a shape inside it.
+  const pointerX = (event, svg) => event.clientX - svg.getBoundingClientRect().left;
+
+  // A day's date at noon, so no time zone moves it to the day before.
+  const dayDate = day => new Date(`${day}T12:00`);
+  const DAYS_SHOWN = 30; // as many as monitor.py keeps in the snapshot
+
+  function daysChart() {
+    const chart = Object.assign(document.createElement("div"), {className: "chart", id: "chart-days"});
+    chart.innerHTML = `<div class="chart-head"><span>Cost per day</span><span></span></div><svg></svg>`;
+    const svg = chart.querySelector("svg");
+    svg.addEventListener("pointermove", e => { hover.days = pointerX(e, svg); drawDays(lastStats); });
+    svg.addEventListener("pointerleave", () => { delete hover.days; drawDays(lastStats); });
+    return chart;
+  }
+
+  // From the monitor's ledger, which survives reboots: one bar per day, in a
+  // fixed slot, so a day keeps its width as the history grows.
+  function drawDays(s) {
+    const chart = $("chart-days");
+    const days = s.energy_ledger?.days ?? [];
+    chart.hidden = !days.length;
+    if (!days.length) return;
+    chart.querySelector(".chart-head span:last-child").textContent = `${cost(days.at(-1).eur)} today`;
+
+    const svg = chart.querySelector("svg");
+    const width = svg.clientWidth, height = 132, left = 30, bottom = 18;
+    const plotW = width - left, plotH = height - bottom - 6, slot = plotW / DAYS_SHOWN;
+    const topCents = niceCeiling(Math.max(...days.map(d => d.eur * 100), 1));
+    const y = eur => 6 + plotH - Math.min(eur * 100, topCents) / topCents * plotH;
+    const x = i => left + plotW - (days.length - i) * slot;
+    const pointed = hover.days === undefined ? null
+      : Math.floor((hover.days - x(0)) / slot);
+    const hovered = pointed >= 0 && pointed < days.length ? pointed : null;
+    const label = day => dayDate(day).toLocaleDateString(undefined, {day: "numeric", month: "short"});
+
+    if (hovered === null) {
+      chart.querySelector(".tooltip")?.remove();
+    } else {
+      const d = days[hovered];
+      showTooltip(chart, x(hovered) + slot / 2, `${cost(d.eur)} · ${energy(d.kwh)}`,
+                  dayDate(d.day).toLocaleDateString(undefined, {dateStyle: "medium"}), null);
+    }
+    svg.innerHTML =
+      `<line class="grid" x1="${left}" x2="${width}" y1="${y(topCents / 100)}" y2="${y(topCents / 100)}"/>` +
+      `<line class="grid" x1="${left}" x2="${width}" y1="${y(0)}" y2="${y(0)}"/>` +
+      `<text class="tick" x="${left - 6}" y="${y(topCents / 100) + 4}" text-anchor="end">${cost(topCents / 100)}</text>` +
+      `<text class="tick" x="${left - 6}" y="${y(0) + 4}" text-anchor="end">0</text>` +
+      `<text class="tick" x="${x(0)}" y="${height - 2}">${label(days[0].day)}</text>` +
+      `<text class="tick" x="${width}" y="${height - 2}" text-anchor="end">today</text>` +
+      days.map((d, i) => `<rect class="bar${hovered !== null && hovered !== i ? " dim" : ""}" ` +
+        `x="${(x(i) + slot * 0.15).toFixed(1)}" y="${y(d.eur).toFixed(1)}" width="${(slot * 0.7).toFixed(1)}" ` +
+        `height="${(y(0) - y(d.eur)).toFixed(1)}" rx="2"/>`).join("") +
       `<rect x="${left}" y="0" width="${plotW}" height="${height}" fill="transparent"/>`;
   }
 
@@ -802,17 +1199,14 @@
     }));
   }
 
-  function showTooltip(chart, cx, value, unit, time, parts) {
+  function showTooltip(chart, cx, value, time, parts, unit) {
     let tip = chart.querySelector(".tooltip");
     if (!tip) {
       tip = Object.assign(document.createElement("div"), {className: "tooltip"});
       chart.append(tip);
     }
-    const strong = Object.assign(document.createElement("strong"),
-      {textContent: `${Math.round(value * 10) / 10}${unit ? ` ${unit}` : ""}`});
-    const when = Object.assign(document.createElement("span"),
-      {textContent: new Date(time * 1000).toLocaleTimeString()});
-    tip.replaceChildren(strong, when);
+    tip.replaceChildren(Object.assign(document.createElement("strong"), {textContent: value}),
+                        Object.assign(document.createElement("span"), {textContent: time}));
     for (const part of parts ?? []) {
       const row = document.createElement("div");
       const key = Object.assign(document.createElement("i"), {});
@@ -839,6 +1233,9 @@
     if (streaming) return streaming.abort();
     const text = $("prompt").value.trim();
     if ((!text && !pending.length) || $("model").disabled) return;
+    // Refused before the field is emptied, so the words are still there to send elsewhere.
+    const refused = refusal($("model").value);
+    if (refused) return toast(refused);
     $("prompt").value = "";
     $("prompt").style.height = "";
     send(text);
@@ -859,20 +1256,37 @@
     }
   });
 
+  // The file picker offers only what the chosen model takes.
   $("attach").addEventListener("click", () => {
-    if (!VISION_MODELS.includes($("model").value))
-      return toast(`Only ${VISION_MODELS.join(", ")} can look at pictures and videos`);
+    const model = $("model").value;
+    const types = Object.keys(MEDIA_TYPES).filter(type => inputs(model).includes(MEDIA_TYPES[type]));
+    if (!types.length)
+      return toast(`${model} reads text only; ${Object.keys(MODEL_INPUTS).join(", ")} take attachments`);
+    $("file").accept = types.join(",");
     $("file").click();
   });
   $("file").addEventListener("change", () => { addFiles([...$("file").files]); $("file").value = ""; });
+  $("record").addEventListener("click", record);
 
-  $("stats-button").addEventListener("click", toggleStats);
-  window.addEventListener("resize", () => lastStats && !$("stats").hidden && renderStats(lastStats));
+  $("stats-button").addEventListener("click", () => toggleView("stats"));
+  $("models-button").addEventListener("click", () => toggleView("models"));
+  $("start-model").addEventListener("click", () => view !== "models" && toggleView("models"));
+  window.addEventListener("resize", () => lastStats && view === "stats" && renderStats(lastStats));
 
-  $("model").addEventListener("change", () => localStorage.setItem("llm-model", $("model").value));
+  $("admin-form").addEventListener("submit", event => {
+    event.preventDefault();
+    adminKey = $("admin-key").value.trim();
+    localStorage.setItem("llm-admin-key", adminKey);
+    loadAdmin();
+  });
+
+  $("model").addEventListener("change", () => {
+    localStorage.setItem("llm-model", $("model").value);
+    updateRecord();
+  });
 
   $("new-chat").addEventListener("click", () => {
-    if (!$("stats").hidden) toggleStats();
+    setView(null);
     streaming?.abort();
     turns = [];
     $("messages").replaceChildren();

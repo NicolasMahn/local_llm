@@ -356,7 +356,7 @@ class StatusButton extends PanelMenu.Button {
         this._icon.opacity = stats?.gateway_up ? 255 : 100;
         this._label.text = stats?.gateway_up ? `${stats.requests}` : 'off';
         if (!stats) {
-            this._energy.label.text = 'Nothing measured: the monitor is not running (./llm monitor)';
+            this._energy.label.text = 'Nothing measured: the monitor is not running (./llm install)';
             this._hardware.label.text = '';
             return;
         }
@@ -367,11 +367,14 @@ class StatusButton extends PanelMenu.Button {
         this._busy.show(history.gpu_busy, `${Math.round(stats.gpu_busy ?? 0)} % GPU`);
 
         // Small amounts read better in Wh and cents than as 0.00 kWh and 0.00 €.
-        const kwh = stats.energy_kwh, eur = stats.cost_eur;
-        const energy = kwh < 1 ? `${(kwh * 1000).toFixed(kwh < 0.01 ? 1 : 0)} Wh` : `${kwh.toFixed(2)} kWh`;
-        const cost = eur < 1 ? `${(eur * 100).toFixed(eur < 0.01 ? 2 : 1)} ct` : `${eur.toFixed(2)} €`;
-        this._energy.label.text = stats.price_ct_per_kwh === null ? `${energy} since boot`
-            : `${energy} · ${cost} since boot · now ${Math.round(stats.price_ct_per_kwh)} ct/kWh`;
+        const energy = kwh => kwh < 1 ? `${(kwh * 1000).toFixed(kwh < 0.01 ? 1 : 0)} Wh` : `${kwh.toFixed(2)} kWh`;
+        const cost = eur => eur < 1 ? `${(eur * 100).toFixed(eur < 0.01 ? 2 : 1)} ct` : `${eur.toFixed(2)} €`;
+        // The ledger keeps days across reboots; today is its last day.
+        const ledger = stats.energy_ledger, today = ledger?.days.at(-1);
+        const price = stats.price_ct_per_kwh === null ? '' : ` · now ${Math.round(stats.price_ct_per_kwh)} ct/kWh`;
+        this._energy.label.text = today
+            ? `Today ${energy(today.kwh)} · ${cost(today.eur)}, in all ${cost(ledger.eur)}${price}`
+            : `${energy(stats.energy_kwh)} since boot${price}`;
 
         const memory = stats.all_memory;
         const hardware = [`${Math.round(memory.gpu_gb + memory.other_gb)} of ${Math.round(memory.total_gb)} GB`];

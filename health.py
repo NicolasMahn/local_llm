@@ -6,6 +6,7 @@ the gateway, the panel, the chat page and `./llm status` all show the same list,
 and the gateway answers requests for a model that is not live with its state.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -33,6 +34,46 @@ def iso(epoch):
 def duration(seconds):
     minutes = round(seconds / 60)
     return f"{minutes} min" if minutes < 90 else f"{minutes / 60:.1f} h"
+
+
+def outside_scope(pid):
+    """The unit holding a container's monitor (conmon, the parent of its first
+    process) when that is not the container's own scope in the local-llm slice,
+    where `llm` puts it; elsewhere it ends with whatever started the container."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+        conmon = re.search(r"^PPid:\s+(\d+)", status, re.M).group(1)
+        cgroup = Path(f"/proc/{conmon}/cgroup").read_text().strip()
+    except (OSError, AttributeError):
+        return None  # Gone or unreadable: nothing to warn about.
+    return None if "/local-llm.slice/" in cgroup else cgroup.rsplit("/", 1)[-1]
+
+
+def exposed_model_ports():
+    """Addresses outside this computer on which a vLLM process listens.
+
+    The model servers have no key; only the gateway may face the network.
+    With host networking vLLM picked the network card's IPv6 link-local
+    address for its engine's internal sockets (found 2026-10-29), which the
+    firewall's default zone lets the whole network reach.
+    """
+    try:
+        out = subprocess.run(["ss", "-ltnpH"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    exposed = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) < 6 or "vllm" not in fields[5].lower():
+            continue
+        host = fields[3].rsplit(":", 1)[0].strip("[]").split("%")[0]
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False  # "*": every address
+        if not loopback:
+            exposed.append(fields[3])
+    return exposed
 
 
 def meminfo():
@@ -174,6 +215,19 @@ class Health:
         if lost:
             problem("warning", f"podman lost track of {', '.join(sorted(lost))} (its runtime files were "
                     "deleted), so a crash there would not be restarted; restart with ./llm up or ./llm gateway")
+
+        # Seen 2026-10-29: models started from the panel lived in GNOME Shell's
+        # cgroup, the gateway in that of the app whose terminal started it.
+        for name, container in sorted(containers.items()):
+            unit = container["State"] == "running" and outside_scope(container["Pid"])
+            if unit:
+                problem("warning", f"{name} stops when {unit} ends (it started there, not in a scope of "
+                        "its own); stop and start it once with ./llm or the website")
+
+        exposed = exposed_model_ports()
+        if exposed:
+            problem("error", f"A model listens on the network without a key ({len(exposed)} port(s), e.g. "
+                    f"{exposed[0]}); restart it with ./llm or the website so it binds to localhost only")
 
         if self.kernel.hangs:
             last = self.kernel.hangs[-1]
