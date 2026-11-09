@@ -146,23 +146,31 @@
 
   /* Models: each one's state and what can be done with it now. */
   #models { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; padding-bottom: 24px; }
-  .model { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px; padding: 8px 6px 8px 12px; }
-  .model + .model { border-top: 1px solid var(--border); }
-  .model strong { font-weight: 600; overflow-wrap: anywhere; }
-  .model p { margin: 0; font-size: 14px; color: var(--muted); }
-  .model .state { display: flex; align-items: center; gap: 8px; }
-  .model .state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .model, .person { display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px; padding: 8px 6px 8px 12px; }
+  .model + .model, .person + .person { border-top: 1px solid var(--border); }
+  .model strong, .person strong { font-weight: 600; overflow-wrap: anywhere; }
+  .model p, .person p { margin: 0; font-size: 14px; color: var(--muted); }
+  .model .state, .person .state { display: flex; align-items: center; gap: 8px; }
+  .model .state::before, .person .state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .model.live .state::before { background: var(--ok); }
   .model.starting .state::before, .model.busy .state::before { background: var(--accent); }
   .model.failed .state::before { background: var(--error); }
+  .person .state::before { background: var(--ok); }
+  .person.blocked .state::before { background: var(--error); }
   .model .problem { grid-column: 1 / -1; color: var(--error); overflow-wrap: anywhere; }
-  .model-actions { grid-column: 2; grid-row: 1 / 3; display: flex; gap: 6px; }
+  .model-actions { align-items: center; grid-column: 2; grid-row: 1 / 3; display: flex; gap: 6px; }
   .model-actions button {
     border: none; border-radius: 10px; background: var(--background);
     padding: 6px 14px; font-size: 14px; font-weight: 600;
   }
   .model-actions button:hover, .model-actions button:focus-visible { background: var(--border); outline: none; }
   .model-actions button:disabled { color: var(--muted); cursor: default; }
+  .model-actions .icon-button { width: 34px; height: 34px; padding: 0; border-radius: 50%; background: transparent; }
+  /* Keys: one per person, made, blocked and deleted with the owner key. */
+  #keys { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; padding-bottom: 24px; }
+  #new-key input { font-family: inherit; font-size: inherit; }
+  #new-key select { border: none; background: transparent; padding: 8px 6px; outline: none; }
+  #keys-note { color: var(--muted); font-size: 13px; margin: 0; }
   #messages { display: flex; flex-direction: column; gap: 20px; padding-top: 12px; padding-bottom: 24px; }
 
   /* Empty state: the way in (key) and the way out (API addresses). */
@@ -266,6 +274,9 @@
       <button id="models-button" class="icon-button" title="Models" aria-label="Models" hidden>
         <svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
       </button>
+      <button id="keys-button" class="icon-button" title="Keys" aria-label="Keys" hidden>
+        <svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m16 7 3 3"/><path d="m19 4 2 2"/></svg>
+      </button>
       <button id="stats-button" class="icon-button" title="Power and load" aria-label="Power and load" hidden>
         <svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="M6 16v-5"/><path d="M11 16V6"/><path d="M16 16v-8"/></svg>
       </button>
@@ -301,6 +312,19 @@
     <div class="card" id="model-list" hidden></div>
     <p id="models-note" hidden></p>
   </div>
+  <div class="column" id="keys" hidden>
+    <form id="new-key" class="card key-form">
+      <input id="new-key-name" placeholder="Name of the person" autocomplete="off" aria-label="Name" required
+             pattern="[\w.\-]{1,40}" title="1 to 40 letters, digits, '.', '_' or '-'">
+      <select id="new-key-role" aria-label="Role">
+        <option value="admin">Chat and models</option>
+        <option value="api">Chat only</option>
+      </select>
+      <button>Make key</button>
+    </form>
+    <div class="card" id="key-list"></div>
+    <p id="keys-note" hidden></p>
+  </div>
 </main>
 
 <footer>
@@ -324,6 +348,7 @@
   <svg data-name="send" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
   <svg data-name="stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/></svg>
   <svg data-name="copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
+  <svg data-name="link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
   <svg data-name="done" viewBox="0 0 24 24"><path d="m5 12 5 5L20 7"/></svg>
   <svg data-name="close" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
   <svg data-name="mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
@@ -490,7 +515,7 @@
 
   async function loadModels() {
     const response = await fetch("/v1/models", {headers: {authorization: `Bearer ${key}`}});
-    if (response.status === 401) return showWelcome(true);
+    if (response.status === 401 || response.status === 403) return showWelcome(true);
     const names = (await response.json()).data.map(m => m.id);
     const select = $("model");
     select.replaceChildren(...(names.length ? names : ["no models running"]).map(n => new Option(n)));
@@ -502,6 +527,7 @@
     updateSend();
     updateRecord();
     checkProblems();
+    checkOwner();
   }
 
   function updateSend() {
@@ -790,7 +816,7 @@
 
   // --- Views that take the chat's place while open, refreshed as long as they show.
 
-  let view = null; // "stats", "models" or null for the chat
+  let view = null; // "stats", "models", "keys" or null for the chat
   let viewTimer = null;
 
   function setView(name) {
@@ -805,13 +831,10 @@
     $(view).hidden = false;
     $(`${view}-button`).classList.add("active");
     $("welcome").hidden = $("messages").hidden = true;
-    if (view === "stats") {
-      loadStats();
-      viewTimer = setInterval(loadStats, 2000);
-    } else {
-      loadAdmin();
-      viewTimer = setInterval(pollAdmin, 3000);
-    }
+    const [load, poll, every] = {stats: [loadStats, loadStats, 2000], models: [loadAdmin, pollAdmin, 3000],
+                                 keys: [loadKeys, loadKeys, 5000]}[view];
+    load();
+    viewTimer = setInterval(poll, every);
   }
 
   function toggleView(name) {
@@ -948,6 +971,138 @@
       loadAdmin();
     }
   }
+
+  // --- Keys: who may use the models, seen and changed with the owner key only.
+
+  // The owner key also works where the admin key and the main key do, so it may
+  // be either of them; null when neither is it. HTTPS only, as for admin().
+  async function owner(path, method = "GET", body) {
+    if (!window.isSecureContext) return null;
+    for (const candidate of new Set([adminKey, key].filter(Boolean))) {
+      const response = await fetch(`/owner/${path}`, {method, body: body && JSON.stringify(body),
+        headers: {authorization: `Bearer ${candidate}`, "content-type": "application/json"}});
+      if (response.status !== 401 && response.status !== 403) return response;
+    }
+    return null;
+  }
+
+  // The keys button shows only to the owner; everyone else never sees it.
+  async function checkOwner() {
+    const response = await owner("keys").catch(() => null);
+    $("keys-button").hidden = !response?.ok;
+    if (!response?.ok && view === "keys") toggleView("keys");
+    return response;
+  }
+
+  // The rows' buttons are rebuilt only when a key comes, goes or changes state.
+  // Usage changes on every poll, and redrawing then would swallow a tap that
+  // lands mid-redraw, so it is written into the rows that are already there.
+  let shownKeys = null;
+  let usageLines = {}; // name: the row's usage line
+
+  function ago(time) {
+    const minutes = minutesSince(time);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    if (minutes < 48 * 60) return `${Math.floor(minutes / 60)} h ago`;
+    return `${Math.floor(minutes / 1440)} days ago`;
+  }
+
+  const ROLE_WORDS = {admin: "chat and models", api: "chat only"};
+
+  function describeKey(entry) {
+    const used = entry.last_used
+      ? `${entry.requests} requests, last ${ago(entry.last_used)}${entry.last_from ? ` from ${entry.last_from}` : ""}`
+      : "never used";
+    return [entry.blocked ? "blocked" : ROLE_WORDS[entry.role], used].join(" · ");
+  }
+
+  async function loadKeys() {
+    try {
+      const response = await checkOwner();
+      if (!response?.ok) return;
+      showKeys(await response.json());
+      $("keys-note").hidden = true;
+    } catch (error) {
+      $("keys-note").hidden = false;
+      $("keys-note").textContent = error.message;
+    }
+  }
+
+  function copyButton(name, title, text) {
+    const button = Object.assign(document.createElement("button"), {type: "button", className: "icon-button", title});
+    button.ariaLabel = title;
+    button.append(icon(name));
+    button.onclick = async () => {
+      await copy(text);
+      button.replaceChildren(icon("done"));
+      setTimeout(() => button.replaceChildren(icon(name)), 1500);
+    };
+    return button;
+  }
+
+  function showKeys(entries) {
+    const shape = JSON.stringify(entries.map(({name, key, role, blocked, built_in}) => [name, key, role, blocked, built_in]));
+    if (shape === shownKeys) {
+      for (const entry of entries) usageLines[entry.name].textContent = describeKey(entry);
+      return;
+    }
+    shownKeys = shape;
+    usageLines = {};
+    $("key-list").replaceChildren(...entries.map(entry => {
+      const row = Object.assign(document.createElement("div"), {className: `person${entry.blocked ? " blocked" : ""}`});
+      const actions = Object.assign(document.createElement("div"), {className: "model-actions"});
+      // The link saves the key in the page that opens it (keyFromLink).
+      actions.append(copyButton("link", "Copy a link that signs in with this key", `${location.origin}/#api=${entry.key}`),
+        copyButton("copy", "Copy the key", entry.key));
+      const change = (label, run) => {
+        const button = Object.assign(document.createElement("button"), {type: "button", textContent: label});
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            await run();
+          } catch (error) {
+            toast(error.message);
+          } finally {
+            shownKeys = null;
+            loadKeys();
+          }
+        };
+        actions.append(button);
+      };
+      change(entry.blocked ? "Unblock" : "Block", () => keyAction(`keys/${entry.name}/${entry.blocked ? "unblock" : "block"}`, "POST"));
+      if (!entry.built_in) change("Delete", async () => {
+        if (confirm(`Delete ${entry.name}'s key? Whoever has it loses access for good.`))
+          await keyAction(`keys/${entry.name}`, "DELETE");
+      });
+      usageLines[entry.name] = Object.assign(document.createElement("p"), {className: "state", textContent: describeKey(entry)});
+      row.append(Object.assign(document.createElement("strong"), {textContent: entry.name}), actions, usageLines[entry.name]);
+      return row;
+    }));
+  }
+
+  // Throws the gateway's reason when it refuses.
+  async function keyAction(path, method, body) {
+    const response = await owner(path, method, body);
+    if (!response) throw new Error("This is no longer the owner key.");
+    const answer = await response.json();
+    if (!response.ok) throw new Error(answer.error?.message ?? (answer.detail ? "Check the name." : response.statusText));
+    return answer;
+  }
+
+  $("new-key").addEventListener("submit", async event => {
+    event.preventDefault();
+    try {
+      const made = await keyAction("keys", "POST", {name: $("new-key-name").value.trim(), role: $("new-key-role").value});
+      $("new-key-name").value = "";
+      toast(`Made a key for ${made.name}; copy it or its link below.`);
+    } catch (error) {
+      toast(error.message);
+    }
+    shownKeys = null;
+    loadKeys();
+  });
+  $("keys-button").addEventListener("click", () => toggleView("keys"));
 
   // --- Measurements: what monitor.py samples, fetched while this view is open.
 
@@ -1278,6 +1433,7 @@
     adminKey = $("admin-key").value.trim();
     localStorage.setItem("llm-admin-key", adminKey);
     loadAdmin();
+    checkOwner();
   });
 
   $("model").addEventListener("change", () => {

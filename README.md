@@ -12,6 +12,7 @@ the OpenAI and the Anthropic API.
     ./llm logs <name>    follow one server
     ./llm key            the API key (made on first start)
     ./llm admin-key      the key that may also start and stop models
+    ./llm owner-key      the key that may also see, make and block keys
     ./llm web <name>     serve the gateway to the internet over HTTPS
     ./llm down           stop everything
     ./llm gateway        restart the gateway (after editing gateway.py)
@@ -75,7 +76,7 @@ Gemmas because those have no audio at all; Gemma 4's E4B also hears, but is
 much weaker.
 
 The gateway listens on the local network and wants a key for everything but
-the chat page and a bare `/health`. Two keys, both made on first use:
+the chat page and a bare `/health`. Three keys, all made on first use:
 
 - the API key (`~/.config/local-llm/api-key`, `./llm key`) reaches the models
   and the measurements. It is the one that goes into clients;
@@ -83,7 +84,10 @@ the chat page and a bare `/health`. Two keys, both made on first use:
   starts and stops models. Keep it to the website and your own scripts, so a
   key leaked from some client cannot turn models off. It works only over
   HTTPS or from this computer: the gateway refuses it over plain HTTP from the
-  network, and the page does not send it there.
+  network, and the page does not send it there;
+- the owner key (`~/.config/local-llm/owner-key`, `./llm owner-key`) also
+  sees, makes and blocks all other keys (below). Keep it to yourself. Like
+  the admin key, it works only over HTTPS or from this computer.
 
 The traffic inside the network is plain HTTP, so anyone on the same network
 could read prompts and the API key; use the HTTPS name where you can. The
@@ -128,6 +132,35 @@ The models that run are remembered (`~/.local/state/local-llm/wanted`), and
 the control service starts them again at boot, together with the gateway and
 HTTPS. A model that crashes is restarted up to three times by podman; after
 that it stays down with its reason, and a restart from the website tries again.
+
+## Handing out keys, and taking them back
+
+Give each person their own key, so you can block one without locking out
+everyone. On the chat page, put the owner key in either key box and a key
+button appears (to the owner only): it makes keys, copies a key or a link
+that signs in with it, and blocks and deletes them. The same, from anywhere
+over HTTPS:
+
+    O=$(./llm owner-key)
+    curl -H "x-api-key: $O" https://<name>/owner/keys
+    curl -X POST -H "x-api-key: $O" https://<name>/owner/keys \
+      -H 'content-type: application/json' -d '{"name": "sam", "role": "admin"}'
+    curl -X POST -H "x-api-key: $O" https://<name>/owner/keys/sam/block
+    curl -X POST -H "x-api-key: $O" https://<name>/owner/keys/sam/unblock
+    curl -X DELETE -H "x-api-key: $O" https://<name>/owner/keys/sam
+
+A role is `api` (models only) or `admin` (also starts and stops them). The
+list shows each key with its requests, when it was last used and from which
+address. A block takes effect on the next request and lasts across restarts.
+The shared keys from `./llm key` and `./llm admin-key` are in the list as
+`api` and `admin`; they can be blocked, but not deleted. Blocking one of them
+locks out everyone you gave it to. To replace one, delete its file
+(`~/.config/local-llm/admin-key`, say) and run `./llm gateway`: the new key
+starts unblocked.
+
+The list is `~/.config/local-llm/keys/keys.json`. The gateway rewrites it, so
+edit it only while the gateway is stopped. The owner key is not in it, so it
+can never be blocked.
 
 ## Waking the computer over the network
 

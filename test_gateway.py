@@ -7,22 +7,37 @@
 import json
 import os
 import re
+import tempfile
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 os.environ["LLM_BACKENDS"] = "tiny=http://backend"
-os.environ["LLM_API_KEY"] = "sk-owner"
+os.environ["LLM_API_KEY"] = "sk-local"
 os.environ["LLM_ADMIN_KEY"] = "sk-admin"
+os.environ["LLM_OWNER_KEY"] = "sk-owner"
+os.environ["LLM_KEYS_FILE"] = str(Path(tempfile.mkdtemp()) / "keys.json")
 
 import gateway  # noqa: E402
+from keys import Keys  # noqa: E402
 
-KEY = {"authorization": "Bearer sk-owner"}
+KEY = {"authorization": "Bearer sk-local"}
 ADMIN = {"x-api-key": "sk-admin"}
+OWNER = {"x-api-key": "sk-owner"}
 ASK = {"model": "tiny", "messages": [{"role": "user", "content": "hi"}]}
-WRONG_KEYS = [{}, {"x-api-key": "sk-nobody"}, {"authorization": "Bearer sk-owne"},
-              {"authorization": "Bearer sk-owner "}, {"authorization": "sk-owner"}]
+WRONG_KEYS = [{}, {"x-api-key": "sk-nobody"}, {"authorization": "Bearer sk-loca"},
+              {"authorization": "Bearer sk-local "}, {"authorization": "sk-local"}]
+BUILT_IN = {"api": "sk-local", "admin": "sk-admin"}
+
+
+@pytest.fixture(autouse=True)
+def keys(monkeypatch, tmp_path):
+    """A fresh key list for every test, so one test's blocks stay out of the next."""
+    fresh = Keys(tmp_path / "keys.json", BUILT_IN)
+    monkeypatch.setattr(gateway, "keys", fresh)
+    return fresh
 
 
 @pytest.fixture
@@ -156,3 +171,65 @@ def test_oversized_request_is_refused(web, backend, monkeypatch):
     big = ASK | {"padding": "x" * 2000}
     assert web.post("/v1/chat/completions", json=big, headers=KEY).status_code == 413
     assert backend == []
+
+
+def test_the_owner_hands_out_a_key_and_blocks_it(web, backend):
+    made = web.post("/owner/keys", json={"name": "sam", "role": "admin"}, headers=OWNER)
+    assert made.status_code == 201
+    sams = {"x-api-key": made.json()["key"]}
+    assert web.post("/v1/chat/completions", json=ASK, headers=sams).status_code == 200
+    assert web.get("/admin/models", headers=sams).status_code == 202
+
+    assert web.post("/owner/keys/sam/block", headers=OWNER).json()["blocked"]
+    assert web.post("/v1/chat/completions", json=ASK, headers=sams).status_code == 403
+    assert web.get("/admin/models", headers=sams).status_code == 403
+    assert web.post("/v1/chat/completions", json=ASK, headers=ADMIN).status_code == 200  # others still work
+
+    web.post("/owner/keys/sam/unblock", headers=OWNER)
+    assert web.post("/v1/chat/completions", json=ASK, headers=sams).status_code == 200
+
+
+def test_the_shared_admin_key_can_be_blocked_too(web, backend):
+    web.post("/owner/keys/admin/block", headers=OWNER)
+    assert web.post("/v1/chat/completions", json=ASK, headers=ADMIN).status_code == 403
+    assert web.post("/v1/chat/completions", json=ASK, headers=KEY).status_code == 200
+
+
+def test_a_block_survives_a_restart(web, keys):
+    web.post("/owner/keys/admin/block", headers=OWNER)
+    assert Keys(keys.path, BUILT_IN).entries["admin"]["blocked"]
+
+
+def test_replacing_a_shared_key_file_starts_it_unblocked(web, keys):
+    web.post("/owner/keys/admin/block", headers=OWNER)
+    restarted = Keys(keys.path, BUILT_IN | {"admin": "sk-admin-new"})
+    assert not restarted.entries["admin"]["blocked"]
+
+
+@pytest.mark.parametrize("headers", [KEY, ADMIN])
+def test_only_the_owner_key_manages_keys(web, headers):
+    assert web.get("/owner/keys", headers=headers).status_code == 403
+    assert web.post("/owner/keys/admin/block", headers=headers).status_code == 403
+    assert web.post("/owner/keys", json={"name": "me", "role": "admin"}, headers=headers).status_code == 403
+
+
+def test_the_owner_key_is_refused_over_plain_http_from_the_network(neighbour, keys):
+    assert neighbour.post("/owner/keys/admin/block", headers=OWNER).status_code == 403
+    assert not keys.entries["admin"]["blocked"]
+
+
+def test_the_owner_sees_who_used_which_key(web, backend):
+    web.post("/v1/chat/completions", json=ASK, headers=ADMIN | {"x-forwarded-for": "203.0.113.9"})
+    admin = next(key for key in web.get("/owner/keys", headers=OWNER).json() if key["name"] == "admin")
+    assert admin["key"] == "sk-admin"
+    assert admin["requests"] == 1
+    assert admin["last_from"] == "203.0.113.9"
+
+
+def test_names_are_unique_and_shared_keys_cannot_be_deleted(web):
+    assert web.post("/owner/keys", json={"name": "admin", "role": "api"}, headers=OWNER).status_code == 409
+    assert web.post("/owner/keys", json={"name": "a/b", "role": "api"}, headers=OWNER).status_code == 409
+    assert web.delete("/owner/keys/admin", headers=OWNER).status_code == 409
+    web.post("/owner/keys", json={"name": "sam", "role": "api"}, headers=OWNER)
+    assert web.delete("/owner/keys/sam", headers=OWNER).status_code == 200
+    assert "sam" not in {key["name"] for key in web.get("/owner/keys", headers=OWNER).json()}

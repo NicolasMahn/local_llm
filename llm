@@ -11,6 +11,7 @@
 #   ./llm list           print each model's name and port
 #   ./llm key            print the API key clients must send
 #   ./llm admin-key      print the key that may also start and stop models
+#   ./llm owner-key      print the key that may also see, make and block keys
 #   ./llm url            print the address other machines use
 #   ./llm web [name]     serve the gateway to the internet over HTTPS, under
 #                        this name (kept for next time); ./llm web off ends it
@@ -27,6 +28,8 @@ WEB_PORT=8443 # the router forwards its port 443 here, see Caddyfile
 HERE=$(dirname "$(readlink -f "$0")")
 KEY_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/local-llm/api-key
 ADMIN_KEY_FILE=$(dirname "$KEY_FILE")/admin-key
+OWNER_KEY_FILE=$(dirname "$KEY_FILE")/owner-key
+KEYS_DIR=$(dirname "$KEY_FILE")/keys # keys.json, which the gateway rewrites
 WEB_NAME_FILE=$(dirname "$KEY_FILE")/web-name # the public name; no file, no way in from outside
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/local-llm # monitor.py writes stats.json here
 # The models that should run: `up <name>` adds to it, `stop` takes out, `down`
@@ -115,8 +118,9 @@ run_container() {
   echo "started llm-$name"
 }
 
-# Made on first use. Two keys, so the one that sits in every client cannot
-# also stop models (or, later, the computer): the admin key can do both.
+# Made on first use. Separate keys, so the one that sits in every client
+# cannot also stop models (or, later, the computer): the admin key can do
+# both. The owner key, which never leaves your hands, also manages the others.
 make_key() {
   local file=$1 prefix=$2
   if [[ ! -s $file ]]; then
@@ -127,6 +131,7 @@ make_key() {
 }
 api_key() { make_key "$KEY_FILE" sk-local; }
 admin_key() { make_key "$ADMIN_KEY_FILE" sk-admin; }
+owner_key() { make_key "$OWNER_KEY_FILE" sk-owner; }
 
 # Edits to the wanted list take turns: the control service may stop one model
 # while another starts.
@@ -200,8 +205,9 @@ ensure_gateway() {
 # The gateway listens on the network; the model servers stay on localhost,
 # so every outside request has to pass the key check. It reaches the control
 # service through the socket in CONTROL_DIR.
-# The whole folder is mounted, not single files: editors that save by replacing
-# a file would otherwise leave the container serving the old chat.html.
+# Whole folders are mounted, not single files: editors that save by replacing
+# a file would otherwise leave the container serving the old chat.html, and the
+# gateway saves keys.json the same way.
 start_gateway() {
   local backends=() model
   for model in "${MODELS[@]}"; do
@@ -209,12 +215,13 @@ start_gateway() {
   done
   local IFS=,
   mkdir -p "$STATE_DIR" "$CONTROL_DIR"
+  (umask 077; mkdir -p "$KEYS_DIR")
   remove llm-gateway
   podman_run -d --name llm-gateway --init --restart on-failure:3 --network host \
-    -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" -v "$CONTROL_DIR:/control" \
+    -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" -v "$CONTROL_DIR:/control" -v "$KEYS_DIR:/keys" \
     --security-opt label=disable -w /app \
     -e LLM_BACKENDS="${backends[*]}" \
-    -e LLM_API_KEY="$(api_key)" -e LLM_ADMIN_KEY="$(admin_key)" \
+    -e LLM_API_KEY="$(api_key)" -e LLM_ADMIN_KEY="$(admin_key)" -e LLM_OWNER_KEY="$(owner_key)" \
     "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
   echo "gateway and test chat on $(url)"
 }
@@ -440,11 +447,12 @@ PY
     list) for model in "${MODELS[@]}"; do echo "$(field "$model" 1) $(field "$model" 2)"; done ;;
     key) api_key ;;
     admin-key) admin_key ;;
+    owner-key) owner_key ;;
     url) url ;;
     web) shift; web "$@" ;;
     install) install_services ;;
     config) config ;;
-    *) sed -n '2,19p' "$0"; exit 1 ;;
+    *) sed -n '2,20p' "$0"; exit 1 ;;
   esac
 }
 

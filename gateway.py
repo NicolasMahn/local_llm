@@ -6,9 +6,10 @@ It also serves a small test chat page at / for other devices on the network,
 at /stats what monitor.py last measured, for that page's graphs, and at
 /admin/ the control service (control.py), which starts and stops models.
 
-Every path needs a key unless it is in PUBLIC. /admin/ needs the admin key,
-which also works everywhere else; the API key, which sits in every client,
-only reaches the models and the measurements.
+Every path needs a key unless it is in PUBLIC. Keys come in three roles: an
+API key, which sits in clients, reaches the models and the measurements; an
+admin key also starts and stops models at /admin/; the owner key also sees,
+makes and blocks the others at /owner/ (keys.py).
 """
 
 import json
@@ -23,13 +24,17 @@ import anyio
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from keys import Keys
 
 # "name=http://host:port,name=http://host:port" — set by the llm script.
 BACKENDS = dict(
     pair.split("=", 1) for pair in os.environ["LLM_BACKENDS"].split(",")
 )
-API_KEY = os.environ["LLM_API_KEY"]
-ADMIN_KEY = os.environ["LLM_ADMIN_KEY"]
+OWNER_KEY = os.environ["LLM_OWNER_KEY"]
+keys = Keys(Path(os.environ.get("LLM_KEYS_FILE", "/keys/keys.json")),
+            {"api": os.environ["LLM_API_KEY"], "admin": os.environ["LLM_ADMIN_KEY"]})
 STATS = Path("/state/stats.json")
 CONTROL = "/control/control.sock"
 # The page holds no key, it asks the visitor for one; /health says only
@@ -91,19 +96,46 @@ async def require_key(request: Request, call_next):
     path = request.scope["path"]
     if path in PUBLIC:
         return await call_next(request)
-    sent = sent_key(request)
-    admin = is_key(sent, ADMIN_KEY)
-    if not admin and not is_key(sent, API_KEY):
+    role = role_of(request)
+    if role is None:
         return error(401, "Missing or wrong API key, see ./llm key")
-    if path == "/admin" or path.startswith("/admin/"):
-        if not admin:
-            return error(403, "Starting and stopping models takes the admin key, see ./llm admin-key")
+    if role == "blocked":
+        return error(403, "This key has been blocked.")
+    area = path.split("/")[1]  # "admin" for /admin/models
+    if area == "owner" and role != "owner":
+        return error(403, "Managing keys takes the owner key, see ./llm owner-key")
+    if area == "admin" and role == "api":
+        return error(403, "Starting and stopping models takes an admin key, see ./llm admin-key")
+    if area in ("admin", "owner"):
         # Plain HTTP from another computer crossed the network readable by anyone
         # on it.
         if not encrypted_or_local(request):
-            return error(403, "The admin key works over the HTTPS address only (./llm url); "
+            return error(403, f"The {role} key works over the HTTPS address only (./llm url); "
                          "it crossed the network unencrypted, so consider replacing it")
     return await call_next(request)
+
+
+def role_of(request: Request) -> str | None:
+    """owner, admin, api or blocked for the key sent, None for no known key."""
+    sent = sent_key(request)
+    if is_key(sent, OWNER_KEY):
+        return "owner"
+    name = keys.find(sent)
+    if name is None:
+        return None
+    if keys.entries[name]["blocked"]:
+        return "blocked"
+    keys.used(name, address(request))
+    return keys.entries[name]["role"]
+
+
+def address(request: Request) -> str | None:
+    """Where the request came from; Caddy, on this computer, says so for the internet."""
+    if request.client is None:
+        return None
+    if request.client.host in ("127.0.0.1", "::1"):
+        return request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
+    return request.client.host
 
 
 def encrypted_or_local(request: Request) -> bool:
@@ -209,6 +241,42 @@ async def admin_model(name: str, action: Literal["start", "stop", "restart"], re
     if name not in BACKENDS:
         return error(404, f"Unknown model {name!r}. Available: {sorted(BACKENDS)}")
     return await to_control("POST", f"/models/{name}/{action}", params=request.query_params)
+
+
+class NewKey(BaseModel):
+    name: str
+    role: Literal["api", "admin"]
+
+
+@app.get("/owner/keys")
+async def list_keys():
+    return keys.listing()
+
+
+@app.post("/owner/keys", status_code=201)
+async def create_key(new: NewKey):
+    try:
+        return keys.create(new.name, new.role)
+    except ValueError as exc:
+        return error(409, str(exc))
+
+
+@app.post("/owner/keys/{name}/{action}")
+async def block_key(name: str, action: Literal["block", "unblock"]):
+    if name not in keys.entries:
+        return error(404, f"No key named {name!r}.")
+    return keys.block(name, action == "block")
+
+
+@app.delete("/owner/keys/{name}")
+async def delete_key(name: str):
+    if name not in keys.entries:
+        return error(404, f"No key named {name!r}.")
+    try:
+        keys.delete(name)
+    except ValueError as exc:
+        return error(409, str(exc))
+    return {"deleted": name}
 
 
 @app.post("/v1/{path:path}")
