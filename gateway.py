@@ -12,7 +12,10 @@ admin key also starts and stops models at /admin/; the owner key also sees,
 makes and blocks the others at /owner/ (keys.py).
 """
 
+import asyncio
+import contextlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -28,10 +31,20 @@ from pydantic import BaseModel
 
 from keys import Keys
 
+# uvicorn's logger, so refusals land in ./llm logs gateway next to the access lines.
+log = logging.getLogger("uvicorn.error")
+
 # "name=http://host:port,name=http://host:port" — set by the llm script.
 BACKENDS = dict(
     pair.split("=", 1) for pair in os.environ["LLM_BACKENDS"].split(",")
 )
+# Optional catalog metadata; the backend remains the authority on which IDs
+# are live. Only capabilities are passed here, never the full local config.
+MODEL_CAPABILITIES = json.loads(os.environ.get("LLM_MODEL_CAPABILITIES", "{}"))
+if not isinstance(MODEL_CAPABILITIES, dict) or any(
+        not isinstance(name, str) or not isinstance(capabilities, dict)
+        for name, capabilities in MODEL_CAPABILITIES.items()):
+    raise ValueError("LLM_MODEL_CAPABILITIES must map model IDs to capability objects")
 OWNER_KEY = os.environ["LLM_OWNER_KEY"]
 keys = Keys(Path(os.environ.get("LLM_KEYS_FILE", "/keys/keys.json")),
             {"api": os.environ["LLM_API_KEY"], "admin": os.environ["LLM_ADMIN_KEY"]})
@@ -73,6 +86,8 @@ def not_live(model: str) -> JSONResponse | None:
         return response
     if state["state"] == "failed":
         return error(503, f"{model} crashed: {state['reason']}")
+    if state.get("reason"):
+        return error(503, f"{model} is unavailable: {state['reason']}")
     return error(503, f"{model} is not running; start it with ./llm up {model} or the panel.")
 
 
@@ -212,7 +227,9 @@ async def list_models():
     for url in BACKENDS.values():
         try:
             response = await client.get(f"{url}/v1/models", timeout=5)
-            models += response.json()["data"]
+            for model in response.json()["data"]:
+                capabilities = MODEL_CAPABILITIES.get(model.get("id"))
+                models.append(model | {"capabilities": capabilities} if capabilities is not None else model)
         except (httpx.HTTPError, KeyError, ValueError):
             pass  # A backend that is still loading just isn't listed yet.
     return {"object": "list", "data": models}
@@ -293,9 +310,15 @@ async def proxy(path: str, request: Request):
         model = json.loads(body).get("model")
     except (ValueError, AttributeError):
         return error(400, "Request body must be a JSON object.")
+    if not isinstance(model, str):
+        return error(400, "Request model must be a string.")
     if model not in BACKENDS:
         return error(404, f"Unknown model {model!r}. Available: {sorted(BACKENDS)}")
     if refusal := not_live(model):
+        # The client sees the reason, but nobody here did: a 503 burst from a
+        # dictation app (2026-11-10) could not be traced to a model or a cause.
+        log.warning("Refused %s for %s: %s", model, request.client.host,
+                    json.loads(refusal.body)["error"]["message"])
         return refusal
 
     headers = {
@@ -304,13 +327,36 @@ async def proxy(path: str, request: Request):
         if key.lower() not in ("host", "content-length", "authorization", "x-api-key")
     }
     try:
-        upstream = await client.send(
+        upstream = await unless_hung_up(request, client.send(
             client.build_request(
                 "POST", f"{BACKENDS[model]}/v1/{path}", content=body, headers=headers,
                 params=request.query_params,
             ),
             stream=True,
-        )
+        ))
     except httpx.HTTPError as exc:
         return error(502, f"{model} is not answering: {exc}")
+    if upstream is None:
+        return error(499, "The client hung up.")
     return Forwarded(upstream)
+
+
+async def unless_hung_up(request: Request, answer):
+    """The backend's answer, or None when the client hung up before it began.
+
+    Without streaming, vLLM sends its first byte only once the whole answer is
+    done, and a model caught in a loop can take hours to get there. Until then
+    nothing noticed the client leaving: two requests from a client that had
+    long given up kept the model busy for over 1.5 hours (2026-10-29).
+    Cancelling closes the connection to vLLM, which then stops the request.
+    The body has been read, so the next message can only be the hang-up;
+    request.is_disconnected() never saw it through the key-check middleware.
+    """
+    waiting = asyncio.ensure_future(answer)
+    hang_up = asyncio.ensure_future(request.receive())
+    await asyncio.wait({waiting, hang_up}, return_when=asyncio.FIRST_COMPLETED)
+    loser = hang_up if waiting.done() else waiting
+    loser.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await loser
+    return waiting.result() if waiting.done() and not waiting.cancelled() else None

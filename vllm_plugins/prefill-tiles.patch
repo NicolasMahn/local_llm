@@ -6,12 +6,12 @@ index ce4a85c..f7d0b0c 100644
          launch_num_warps = 8
          launch_num_stages = 2
  
-+    # Strix Halo (gfx1151), full-attention prefill with 256-wide heads, as in
-+    # Qwen3.8: with 16 rows each work unit covers two prompt tokens and reads
-+    # the whole context for them. 128 rows and 64-key tiles made it 9x faster
-+    # (local_llm: vllm_plugins/).
++    # Strix Halo (gfx1151), full-attention prefill: with 16 rows each work unit
++    # covers a few prompt tokens and reads the whole context for them. 128 rows
++    # and 64-key tiles made 256-wide heads (Qwen3.8) 9x faster, and 128-wide
++    # heads read a 24k prompt 1.5-2.2x faster (local_llm: vllm_plugins/).
 +    tuned_rdna_prefill = (
-+        head_size == 256
++        head_size in (128, 256)
 +        and max_seqlen_q > 1
 +        and window_size[0] < 0
 +        and not tuned_large_head

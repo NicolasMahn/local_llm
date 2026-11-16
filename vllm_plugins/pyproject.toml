@@ -1,14 +1,17 @@
 [project]
 name = "local-llm-plugins"
 version = "1"
-description = "vLLM fixes for this box: long-context prefill attention, forced tool calls for Gemma 4"
+description = "vLLM attention fixes and measured 8060S kernel improvements"
 
 [project.entry-points."vllm.general_plugins"]
 local_llm_attention = "local_llm_attention:register"
 local_llm_tools = "local_llm_tools:register"
+local_llm_kernels = "local_llm_kernels:register"
+local_llm_rdna = "local_llm_rdna:register"
+local_llm_reasoning = "local_llm_reasoning:register"
 
 [tool.setuptools]
-py-modules = ["local_llm_attention", "local_llm_tools"]
+py-modules = ["local_llm_attention", "local_llm_tools", "local_llm_kernels", "local_llm_dense", "local_llm_moe", "local_llm_encoder", "local_llm_rdna", "local_llm_reasoning"]
 
 [build-system]
 requires = ["setuptools"]

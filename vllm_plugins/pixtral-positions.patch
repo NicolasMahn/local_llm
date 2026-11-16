@@ -1,0 +1,39 @@
+diff --git a/vllm/model_executor/models/pixtral.py b/vllm/model_executor/models/pixtral.py
+index b6848b0..8fef340 100644
+--- a/vllm/model_executor/models/pixtral.py
++++ b/vllm/model_executor/models/pixtral.py
+@@ -17,9 +17,8 @@ from transformers.models.pixtral.image_processing_pixtral import (
+     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
+ )
+ from transformers.models.pixtral.modeling_pixtral import (
+-    PixtralRotaryEmbedding,
++    PixtralVisionRotaryEmbedding as PixtralRotaryEmbedding,
+     apply_rotary_pos_emb,
+-    position_ids_in_meshgrid,
+ )
+ 
+ from vllm.config import VllmConfig
+@@ -92,6 +91,23 @@ from .vision import (
+ PATCH_MERGE = "patch_merge"
+ 
+ 
++def position_ids_in_meshgrid(patch_embeds_list, max_width):
++    """(row, column) of every patch, which Transformers 5 rotates by.
++
++    Transformers 4 took flat row * max_width + column indices instead. The
++    angles are the same, so max_width is no longer needed.
++    """
++    positions = []
++    for patch in patch_embeds_list:
++        rows, columns = torch.meshgrid(
++            torch.arange(patch.shape[-2], device=patch.device),
++            torch.arange(patch.shape[-1], device=patch.device),
++            indexing="ij",
++        )
++        positions.append(torch.stack([rows.flatten(), columns.flatten()], dim=-1))
++    return torch.cat(positions, dim=0)
++
++
+ def _make_packed_sequence_metadata(
+     sequence_lengths: list[int],
+     attn_backend: AttentionBackendEnum,
