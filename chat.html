@@ -364,6 +364,9 @@
     "gemma-4-12b": ["image", "video", "audio"],
     "gemma-4-31b": ["image", "video"],
     "muse-glimmer-30b": ["image", "video"],
+    "qwen3-omni-30b": ["image", "video", "audio"],
+    "mistral-small-3.2-24b": ["image"],
+    "ministral-3-3b": ["image"],
   };
   const inputs = model => MODEL_INPUTS[model] ?? [];
   const NOUNS = {image: "pictures", video: "videos", audio: "audio"};
@@ -898,12 +901,14 @@
   // A model as the list shows it: the state's colour, words, problems, and what can be done.
   function describe(model) {
     const problems = [];
-    if (model.state === "failed" && !model.job) problems.push(model.reason);
+    if (model.reason && !model.job) problems.push(model.reason);
     if (model.failed_job) problems.push(`Could not ${model.failed_job.action}: ${model.failed_job.message}`);
     const shown = {name: model.name, state: model.state, problems, waiting: false, actions: []};
     if (model.job) {
       Object.assign(shown, {state: "busy", waiting: true, actions: model.job.action === "stop" ? [] : ["stop"],
         words: DOING[model.job.action] + forMinutes(model.state === "starting" ? model.started : model.job.since)});
+    } else if (model.state === "off" && model.reason) {
+      Object.assign(shown, {words: "unavailable"});
     } else if (!model.downloaded) {
       Object.assign(shown, {state: "off", words: "not downloaded"});
     } else if (model.state === "live") {

@@ -1,11 +1,19 @@
 # The way in from the internet: HTTPS in front of the gateway. Started by
-# ./llm web, which sets the name. The router forwards its port 443 here.
+# ./llm web, which sets the name. The router shares port 443 of this computer
+# and the firewall passes it on to https_port.
 {
-	# Ports above 1024, so the container needs no root and no firewall change.
+	# Ports above 1024, so the container needs no root.
 	https_port 8443
 	http_port 8480
 	auto_https disable_redirects
 	admin off
+	# No HTTP/3: only TCP 443 is passed on, so QUIC over UDP half works. Small
+	# requests got through, a dictation's megabytes hung until the client's
+	# timeout, and macOS's URLSession, unlike browsers, never fell back to TCP
+	# (2026-11-10).
+	servers {
+		protocols h1 h2
+	}
 }
 
 {$LLM_PUBLIC_NAME} {
@@ -17,5 +25,8 @@
 	}
 	# Which models run is nobody's business out there.
 	respond /health 404
+	# Clients remember an HTTP/3 offer for up to 30 days; this withdraws the one
+	# Caddy made before HTTP/3 was turned off. Harmless to keep.
+	header Alt-Svc clear
 	reverse_proxy 127.0.0.1:8400
 }

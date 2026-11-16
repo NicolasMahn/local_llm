@@ -4,10 +4,12 @@
         localhost/local-llm:latest python3 -m pytest -q -p no:cacheprovider test_gateway.py test_control.py
 """
 
+import asyncio
 import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -30,6 +32,14 @@ ASK = {"model": "tiny", "messages": [{"role": "user", "content": "hi"}]}
 WRONG_KEYS = [{}, {"x-api-key": "sk-nobody"}, {"authorization": "Bearer sk-loca"},
               {"authorization": "Bearer sk-local "}, {"authorization": "sk-local"}]
 BUILT_IN = {"api": "sk-local", "admin": "sk-admin"}
+
+
+@pytest.mark.parametrize("model", [None, [], {}, 1, True])
+def test_invalid_model_types_are_client_errors_without_forwarding(web, backend, model):
+    response = web.post("/v1/chat/completions", json=ASK | {"model": model}, headers=KEY)
+    assert response.status_code == 400
+    assert "string" in response.json()["error"]["message"]
+    assert not backend
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +95,70 @@ def neighbour(backend, control):
 def test_request_with_the_key_reaches_the_model(web, backend):
     assert web.post("/v1/chat/completions", json=ASK, headers=KEY).json() == {"ok": True}
     assert [json.loads(request.content) for request in backend] == [ASK]
+
+
+def test_live_discovery_adds_catalog_capabilities_without_changing_standard_fields(web, monkeypatch):
+    from model_catalog import MODELS
+
+    capabilities = {name: model["capabilities"] for name, model in MODELS.items()}
+    monkeypatch.setattr(gateway, "MODEL_CAPABILITIES", capabilities)
+    standard = [{"id": name, "object": "model", "created": 123, "owned_by": "vllm",
+                 "max_model_len": 32768} for name in capabilities]
+    standard += [{"id": "unknown-model", "object": "model", "owned_by": "other", "max_model_len": 8192}]
+    monkeypatch.setattr(gateway, "client", httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"data": standard}))))
+    response = web.get("/v1/models", headers=KEY)
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    assert [row["id"] for row in rows] == [row["id"] for row in standard]
+    for original, enriched in zip(standard[:3], rows[:3]):
+        assert enriched == original | {"capabilities": capabilities[original["id"]]}
+    assert rows[-1] == standard[-1]
+    assert rows[2]["capabilities"]["tools"] is False
+    assert "sk-local" not in response.text and "sk-admin" not in response.text and "sk-owner" not in response.text
+
+
+def test_catalog_metadata_does_not_advertise_offline_models_or_require_admin_access(web, monkeypatch):
+    monkeypatch.setattr(gateway, "MODEL_CAPABILITIES", {"offline": {"tools": False}, "tiny": {"tools": True}})
+    monkeypatch.setattr(gateway, "client", httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"data": [{"id": "tiny", "owned_by": "vllm"}]}))))
+    assert web.get("/v1/models", headers=KEY).json() == {
+        "object": "list", "data": [{"id": "tiny", "owned_by": "vllm", "capabilities": {"tools": True}}]}
+
+
+def test_gateway_launch_passes_only_capabilities_from_cli_config(tmp_path):
+    import shlex
+    import subprocess
+
+    source = Path(__file__).with_name("llm").read_text()
+    function = re.search(r"start_gateway\(\) \{.*?\n\}", source, re.S).group(0)
+    capture = tmp_path / "argv"
+    config = {"models": [{"name": "known", "capabilities": {"tools": False, "input": ["text"]},
+                           "private_setting": "synthetic-private"}, {"name": "legacy"}],
+              "api_key": "synthetic-private-key"}
+    program = "\n".join([
+        "set -euo pipefail", f"config() {{ printf '%s' {shlex.quote(json.dumps(config))}; }}",
+        "field() { cut -d'|' -f\"$2\" <<<\"$1\"; }", "remove() { :; }",
+        "api_key() { echo synthetic-api; }", "admin_key() { echo synthetic-admin; }",
+        "owner_key() { echo synthetic-owner; }", "url() { echo http://synthetic; }",
+        f"podman_run() {{ printf '%s\\0' \"$@\" > {shlex.quote(str(capture))}; }}",
+        'MODELS=("known|8007|0.23|owner/repo|")', "IMAGE=synthetic-image", "GATEWAY_PORT=8400",
+        *[f"{name}={shlex.quote(str(tmp_path / name))}" for name in ("STATE_DIR", "CONTROL_DIR", "KEYS_DIR", "HERE")],
+        function, "start_gateway"])
+    subprocess.run(["bash", "-c", program], check=True, text=True, capture_output=True)
+    arguments = capture.read_bytes().decode().split("\0")
+    value = next(argument.partition("=")[2] for argument in arguments if argument.startswith("LLM_MODEL_CAPABILITIES="))
+    assert json.loads(value) == {"known": {"tools": False, "input": ["text"]}}
+    assert "synthetic-private" not in value
+
+
+def test_missing_storage_reason_reaches_the_client_without_calling_the_backend(web, backend, monkeypatch):
+    reason = "Required storage is not mounted at /mnt/archive"
+    monkeypatch.setattr(gateway, "model_state", lambda model: {"state": "off", "reason": reason})
+    response = web.post("/v1/chat/completions", json=ASK, headers=KEY)
+    assert response.status_code == 503
+    assert reason in response.json()["error"]["message"]
+    assert backend == []
 
 
 def test_the_key_is_not_passed_on_to_the_model(web, backend):
@@ -171,6 +245,44 @@ def test_oversized_request_is_refused(web, backend, monkeypatch):
     big = ASK | {"padding": "x" * 2000}
     assert web.post("/v1/chat/completions", json=big, headers=KEY).status_code == 413
     assert backend == []
+
+
+def test_a_client_that_hangs_up_stops_the_model(monkeypatch):
+    """Without streaming, vLLM answers only when done, which a model caught in a
+    loop may never be: the client leaving must stop it before then."""
+    stopped = asyncio.Event()
+
+    async def never_answers(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(gateway, "client", httpx.AsyncClient(transport=httpx.MockTransport(never_answers)))
+    messages = [{"type": "http.request", "body": json.dumps(ASK).encode(), "more_body": False}]
+    hang_up_at = time.monotonic() + 0.5  # the client waits a while, then gives up
+
+    async def receive():
+        # As uvicorn: once the client is gone, at once; until then, blocking.
+        if messages:
+            return messages.pop(0)
+        if time.monotonic() < hang_up_at:
+            await asyncio.sleep(hang_up_at - time.monotonic())
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/v1/chat/completions", "raw_path": b"/v1/chat/completions",
+             "root_path": "", "query_string": b"", "client": ("127.0.0.1", 50000), "server": ("gateway", 8400),
+             "headers": [(b"authorization", b"Bearer sk-local"), (b"content-type", b"application/json")]}
+
+    async def scenario():
+        await asyncio.wait_for(gateway.app(scope, receive, send), timeout=10)
+        await asyncio.wait_for(stopped.wait(), timeout=1)
+
+    asyncio.run(scenario())
 
 
 def test_the_owner_hands_out_a_key_and_blocks_it(web, backend):

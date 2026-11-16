@@ -24,6 +24,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from health import Health
+from model_usage import ModelUsage, benchmarked_model
 
 INTERVAL = 2  # seconds between samples
 HISTORY_KEYS = ("time", "power_w", "gpu_w", "cpu_w", "rest_w", "mem_gpu_gb", "mem_other_gb",
@@ -226,6 +227,8 @@ class Monitor:
         self.health = Health(STATE)
         self._resume()
         self.ledger = Ledger(LEDGER)
+        self.usage = ModelUsage(STATE / "model-usage.json", self.boot_id)
+        self.measured = None  # the model a benchmark named at the last sample
         # The first ledger starts with what this boot counted before it existed.
         if not LEDGER.exists() and self.energy_j:
             self.ledger.add(date.today().isoformat(), self.energy_j / 3.6e6, self.cost_eur)
@@ -273,12 +276,17 @@ class Monitor:
         self.ledger.save()
 
         model_stats, total_rate, total_requests = {}, 0.0, 0
+        # One more sample after a benchmark ends still holds its last requests.
+        measuring = benchmarked_model()
+        measured = {measuring, self.measured}
+        self.measured = measuring
         for name, port in self.models.items():
             try:
                 text = fetch(f"http://127.0.0.1:{port}/metrics")
             except OSError:
                 model_stats[name] = {"up": False}
                 self.tokens.pop(name, None)
+                self.usage.observe(name, None, now)
                 continue
             running = int(metric(text, "vllm:num_requests_running") or 0)
             waiting = int(metric(text, "vllm:num_requests_waiting") or 0)
@@ -288,6 +296,12 @@ class Monitor:
             self.tokens[name] = tokens
             total_rate += rate
             total_requests += running + waiting
+            self.usage.observe(name, {
+                "completed_requests": metric(text, "vllm:request_success_total"),
+                "input_tokens": metric(text, "vllm:prompt_tokens_total"),
+                "output_tokens": tokens,
+            }, now, active=running + waiting, server_id=metric(text, "process_start_time_seconds"),
+                count=name not in measured)
             model_stats[name] = {
                 "up": True,
                 "running": running,
@@ -295,6 +309,7 @@ class Monitor:
                 "cache": metric(text, "vllm:kv_cache_usage_perc") or 0,
                 "tokens_per_second": round(rate, 1),
             }
+        self.usage.save()
 
         try:
             gateway_up = bool(fetch(GATEWAY + "/health"))
@@ -318,7 +333,10 @@ class Monitor:
         celsius = read_number(hwmon / "temp1_input") if hwmon else None
         model_states, problems = self.health.check(
             now, {name: stats["up"] for name, stats in model_stats.items()}, total_requests,
-            {"busy": gpu_busy, "gtt_total": mem["gtt_total"]}, celsius / 1000 if celsius else None)
+            {"busy": gpu_busy, "gtt_total": mem["gtt_total"]}, celsius / 1000 if celsius else None,
+            {name: stats.get("running", 0) + stats.get("waiting", 0) for name, stats in model_stats.items()})
+        if self.usage.error:
+            problems.append({"severity": "warning", "message": self.usage.error, "since": None})
 
         for key, value in (
             ("time", round(now)),
@@ -346,6 +364,7 @@ class Monitor:
             "energy_kwh": self.energy_j / 3.6e6,
             "cost_eur": self.cost_eur,
             "energy_ledger": self.ledger.summary(),
+            "model_usage": self.usage.summary(),
             "market_ct_per_kwh": market,
             "price_ct_per_kwh": price,
             "gpu_busy": gpu_busy,

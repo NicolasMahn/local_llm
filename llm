@@ -18,12 +18,13 @@
 #   ./llm install        install and start the monitor and the control service
 #                        (once; they start at boot from then on)
 #   ./llm config         print the models and memory budget as JSON
+#   ./llm usage [--json]  show measured model usage for storage decisions
 set -euo pipefail
 
-IMAGE=localhost/local-llm:latest
+IMAGE=${LOCAL_LLM_IMAGE:-localhost/local-llm:latest}
 WEB_IMAGE=docker.io/library/caddy:2
 GATEWAY_PORT=8400
-WEB_PORT=8443 # the router forwards its port 443 here, see Caddyfile
+WEB_PORT=8443 # the firewall passes port 443 on to here, see web_firewall
 # Resolved, because the GNOME panel runs this through a symlink.
 HERE=$(dirname "$(readlink -f "$0")")
 KEY_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/local-llm/api-key
@@ -47,7 +48,13 @@ CONTROL_DIR=${XDG_RUNTIME_DIR:-/tmp}/local-llm # control.py's socket, for the ga
 # Gemma 4 12B is the one that hears (audio, up to 30 s a clip). Gemma 4 31B
 # keeps the most per token (4 global KV heads over 60 layers): its full 262k
 # would need 22 GB of cache, a 0.42 share; it gets 131k instead, which a dense
-# 31B reads slowly anyway, and so still runs next to two others.
+# 31B reads slowly anyway, and so still runs next to two others. Qwen3 Omni
+# also hears and sees, faster than Gemma 4 12B: a mixture of experts with 3B
+# active per token; its speech output (talker) is not loaded, it answers in text.
+# It reads images near full size: a Retina screenshot became 5,000 tokens and
+# 10 s before the first word. Capped at 1M pixels it is ~1,000 tokens and 1.5 s
+# (fine print may need a request's own cap, README); small images are enlarged
+# to 400k pixels, below which it misread a big 4711 as 411.
 # A single GPU call that runs for seconds keeps the desktop off the GPU, and
 # after 2 s the kernel resets it (README). Prefill steps of 512 tokens keep
 # each call short; the default 8192 crashed the desktop. Attention calls also
@@ -59,6 +66,10 @@ CONTROL_DIR=${XDG_RUNTIME_DIR:-/tmp}/local-llm # control.py's socket, for the ga
 # ended, so a chat turn, which diverges where the last answer began, missed.
 # retention-interval keeps one every window (Gemma) or page (Qwen); they are
 # evicted like any cached block, so they cost no reserved memory.
+# vLLM picks its ROCm attention for the models that name none. Omni is best
+# there. Muse is not: its window layers keep it off that backend's fast decode
+# kernel, and behind 24k tokens it generated at half speed (7.5 against 13.6
+# tokens/s) until it was put on the Triton backend, the one vllm_plugins/ tunes.
 # With tool_choice "none" both models still tried to call a tool, which vLLM
 # dropped, leaving an empty or cut-off answer; hiding the tools fixes that, at
 # the cost of that one turn missing the prefix cache.
@@ -67,12 +78,27 @@ MODELS=(
   "gemma-4-26b|8002|0.25|cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
   "gemma-4-12b|8003|0.18|google/gemma-4-12B-it-qat-w4a16-ct|--max-model-len 262144 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
   "gemma-4-31b|8004|0.32|google/gemma-4-31B-it-qat-w4a16-ct|--max-model-len 131072 --max-num-batched-tokens 512 --prefix-cache-retention-interval 1024 --reasoning-parser gemma4 --tool-call-parser gemma4 --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
-  "muse-glimmer-30b|8005|0.30|RedHatAI/Muse-Glimmer-30B-INT4|--max-model-len 131072 --max-num-batched-tokens 512 --prefix-cache-retention-interval 2048 --reasoning-parser muse_glimmer --tool-call-parser muse_glimmer --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "muse-glimmer-30b|8005|0.30|RedHatAI/Muse-Glimmer-30B-INT4|--max-model-len 131072 --max-num-batched-tokens 512 --prefix-cache-retention-interval 2048 --attention-backend TRITON_ATTN --reasoning-parser muse_glimmer --tool-call-parser muse_glimmer --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
+  "qwen3-omni-30b|8006|0.30|cyankiwi/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit|--max-model-len 65536 --max-num-batched-tokens 512 --mm-processor-kwargs {\"size\":{\"longest_edge\":1003520,\"shortest_edge\":401408}} --tool-call-parser hermes --enable-auto-tool-choice --exclude-tools-when-tool-choice-none"
 )
+# Keep pinned additions, download locations and capability descriptions together.
+ADDED_MODELS=$(python3 "$HERE/model_catalog.py" rows)
+while IFS= read -r model; do MODELS+=("$model"); done <<<"$ADDED_MODELS"
 MEMORY_BUDGET=0.95 # shares of all running models together; the rest is the desktop's
 WORKING_ROOM_GB=4  # beyond the weights: compiled graphs, activations, a minimal cache
 
 field() { cut -d'|' -f"$2" <<<"$1"; }
+
+# LOCAL_LLM_COPY=NAME adds NAME-copy, ten ports up: a second instance of one
+# of the six models above, to try a setting on while the first stays in use.
+# It exists only for commands that set the variable, and is never resumed at boot.
+if [[ -n ${LOCAL_LLM_COPY:-} ]]; then
+  for model in "${MODELS[@]}"; do
+    [[ $(field "$model" 1) == "$LOCAL_LLM_COPY" ]] || continue
+    MODELS+=("$LOCAL_LLM_COPY-copy|$(($(field "$model" 2) + 10))|$(cut -d'|' -f3- <<<"$model")")
+    break
+  done
+fi
 
 # --init puts a tiny init first in the container: as process 1, vLLM would
 # ignore the stop signal and podman would wait 10 s before killing it.
@@ -100,19 +126,90 @@ podman_run() {
   systemd-run --user --scope --quiet --collect --slice=local-llm podman run "$@"
 }
 
+fast_kernel_mode() {
+  # Gemma's warm-cache expert gain did not improve full-model serving.
+  # Keep its tuned native path by default; an explicit override allows experiments.
+  local default=1
+  [[ ${1%-copy} == gemma-4-26b ]] && default=0
+  if [[ ${LOCAL_LLM_FAST_KERNELS:-$default} == 0 ]]; then echo 0; else echo 1; fi
+}
+
 run_container() {
   local name=$1; shift
+  local -a cpu_environment=() checkpoint_mount=() profile_mount=() moe_mount=()
+  local -a cache_mount=()
+  local model repo cache
+  for model in "${MODELS[@]}"; do
+    [[ $(field "$model" 1) == "$name" ]] || continue
+    repo=$(field "$model" 4)
+    break
+  done
+  if python3 "$HERE/model_catalog.py" contains "$name"; then
+    checkpoint_mount=(-v "$(python3 "$HERE/model_catalog.py" mount "$repo")")
+  else
+    python3 "$HERE/model_catalog.py" check-cache "$repo" || return 1
+    cache=$(python3 "$HERE/model_catalog.py" cache-root "$repo") || return 1
+    cache_mount=(-v "$cache:/root/.cache/huggingface")
+  fi
+  if [[ ${name%-copy} == qwen3-omni-30b ]]; then
+    # Its CPU audio feature extractor is slower with the default 32 threads.
+    # The serving worker already uses one thread; this also bounds preprocessing.
+    cpu_environment=(-e "OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}")
+  elif [[ $name == granite-4.2-30b ]]; then
+    # The measured smaller-memory profile used one frontend thread too.
+    # Its serving worker already limits Torch execution to one thread.
+    cpu_environment=(-e "OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}")
+  elif [[ -n ${OMP_NUM_THREADS:-} ]]; then
+    cpu_environment=(-e "OMP_NUM_THREADS=$OMP_NUM_THREADS")
+  fi
+  # With the runtime's default of four GPU queues, a loaded model keeps the
+  # GPU at 100% without any request: about 20 W more at idle, and nothing can
+  # tell a busy GPU from a stuck one. One queue idles at 2% and serves at the
+  # same speed (benchmarks/all-models-2026-11-14.md). health.py warns about a
+  # running model that was started without it.
+  cpu_environment+=(-e "GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}")
+  # An explicit experiment control; host variables otherwise do not reach Podman.
+  if [[ -n ${VLLM_USE_V2_MODEL_RUNNER:-} ]]; then
+    cpu_environment+=(-e "VLLM_USE_V2_MODEL_RUNNER=$VLLM_USE_V2_MODEL_RUNNER")
+  fi
+  local namespace
+  namespace=$(python3 "$HERE/model_catalog.py" cache-namespace "$name")
+  if [[ -n $namespace ]]; then
+    # Post-load compatibility fixes can change compiled optional tensor inputs.
+    # Never replay AOT graphs captured before the runtime fix was installed.
+    cpu_environment+=(-e "VLLM_CACHE_ROOT=/root/.cache/vllm/$namespace")
+  fi
+  if [[ -n ${LOCAL_LLM_PROFILE_DIR:-} ]]; then
+    mkdir -p "$LOCAL_LLM_PROFILE_DIR"
+    profile_mount=(-v "$LOCAL_LLM_PROFILE_DIR:/profiles")
+    set -- "$@" --profiler-config '{"profiler":"torch","torch_profiler_dir":"/profiles","torch_profiler_with_stack":false,"torch_profiler_record_shapes":true,"ignore_frontend":true}'
+  fi
+  if [[ -n ${LOCAL_LLM_MOE_PROFILE_DIR:-} ]]; then
+    [[ $name == nemotron-3.5-lightning-30b-a3b && -d $LOCAL_LLM_MOE_PROFILE_DIR ]] || {
+      echo 'LOCAL_LLM_MOE_PROFILE_DIR requires an existing Nemotron 3.5 profile directory' >&2
+      return 1
+    }
+    # Native profile filenames omit the quantization group. Scope experiments
+    # to this container instead of installing group64 tuning globally.
+    moe_mount=(-v "$LOCAL_LLM_MOE_PROFILE_DIR:/moe-profiles:ro")
+    cpu_environment+=(-e VLLM_TUNED_CONFIG_FOLDER=/moe-profiles)
+  fi
   mkdir -p "$HOME/.cache/llm-kernels/triton" "$HOME/.cache/llm-kernels/comgr"
   remove "llm-$name"
-  podman_run -d --name "llm-$name" --init --restart on-failure:3 \
+  podman_run -d --name "llm-$name" --init --restart "${LOCAL_LLM_RESTART_POLICY:-on-failure:3}" \
     --network host --ipc host \
     --device /dev/kfd --device /dev/dri --group-add keep-groups \
     --security-opt seccomp=unconfined --security-opt label=disable \
-    -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    "${cache_mount[@]}" \
     -v "$HOME/.cache/vllm:/root/.cache/vllm" \
     -v "$HOME/.cache/llm-kernels/triton:/root/.triton" \
     -v "$HOME/.cache/llm-kernels/comgr:/root/.cache/comgr" \
+    "${checkpoint_mount[@]}" \
+    "${profile_mount[@]}" \
+    "${moe_mount[@]}" \
     -e HF_HUB_OFFLINE=1 -e VLLM_HOST_IP=127.0.0.1 -e GLOO_SOCKET_IFNAME=lo \
+    -e LOCAL_LLM_FAST_KERNELS="$(fast_kernel_mode "$name")" \
+    "${cpu_environment[@]}" \
     -e TRITON_CACHE_AUTOTUNING=1 -e TRITON_PRINT_AUTOTUNING=1 \
     "$IMAGE" "$@" >/dev/null 9>&-
   echo "started llm-$name"
@@ -188,7 +285,22 @@ web() {
     -v "$HERE/Caddyfile:/etc/caddy/Caddyfile:ro" -v "$certs:/data" --security-opt label=disable \
     -e LLM_PUBLIC_NAME="$(<"$WEB_NAME_FILE")" \
     "$WEB_IMAGE" >/dev/null 9>&-
-  echo "$(url) once the router forwards port 443 to port $WEB_PORT here"
+  web_firewall
+  echo "$(url) once the router shares port 443 of this computer (IPv4 and IPv6)"
+}
+
+# The router passes port 443 on unchanged, which only root may listen on, so
+# the firewall turns it into Caddy's port. IPv6 needs its own rule.
+web_firewall() {
+  command -v firewall-cmd >/dev/null || return 0
+  local fix=()
+  firewall-cmd --list-forward-ports | grep -q "port=443:proto=tcp:toport=$WEB_PORT:" ||
+    fix+=("sudo firewall-cmd --permanent --add-forward-port=port=443:proto=tcp:toport=$WEB_PORT")
+  firewall-cmd --list-rich-rules | grep -q "family=\"ipv6\" forward-port port=\"443\" protocol=\"tcp\" to-port=\"$WEB_PORT\"" ||
+    fix+=("sudo firewall-cmd --permanent --add-rich-rule='rule family=\"ipv6\" forward-port port=\"443\" protocol=\"tcp\" to-port=\"$WEB_PORT\"'")
+  ((${#fix[@]})) || return 0
+  echo "the firewall does not pass port 443 on to Caddy yet; run:" >&2
+  printf '  %s\n' "${fix[@]}" "sudo firewall-cmd --reload" >&2
 }
 
 # Left alone when it already runs, so starting one model does not cut off
@@ -209,10 +321,11 @@ ensure_gateway() {
 # a file would otherwise leave the container serving the old chat.html, and the
 # gateway saves keys.json the same way.
 start_gateway() {
-  local backends=() model
+  local backends=() model capabilities
   for model in "${MODELS[@]}"; do
     backends+=("$(field "$model" 1)=http://127.0.0.1:$(field "$model" 2)")
   done
+  capabilities=$(config | python3 -c 'import json,sys; print(json.dumps({m["name"]: m["capabilities"] for m in json.load(sys.stdin)["models"] if "capabilities" in m}))')
   local IFS=,
   mkdir -p "$STATE_DIR" "$CONTROL_DIR"
   (umask 077; mkdir -p "$KEYS_DIR")
@@ -221,6 +334,7 @@ start_gateway() {
     -v "$HERE:/app:ro" -v "$STATE_DIR:/state:ro" -v "$CONTROL_DIR:/control" -v "$KEYS_DIR:/keys" \
     --security-opt label=disable -w /app \
     -e LLM_BACKENDS="${backends[*]}" \
+    -e LLM_MODEL_CAPABILITIES="$capabilities" \
     -e LLM_API_KEY="$(api_key)" -e LLM_ADMIN_KEY="$(admin_key)" -e LLM_OWNER_KEY="$(owner_key)" \
     "$IMAGE" uvicorn gateway:app --host 0.0.0.0 --port "$GATEWAY_PORT" >/dev/null 9>&-
   echo "gateway and test chat on $(url)"
@@ -244,7 +358,18 @@ gpu_bytes() {
 }
 
 snapshot() {
-  local snapshots=("$HOME/.cache/huggingface/hub/models--${1//\//--}/snapshots/"*/)
+  local pinned status cache
+  if pinned=$(python3 "$HERE/model_catalog.py" snapshot "$1"); then
+    echo "$pinned"
+    return
+  else
+    status=$?
+    [[ $status == 1 ]] || return "$status"
+  fi
+  # Expanding the cache glob itself can trigger an absent archive automount.
+  python3 "$HERE/model_catalog.py" check-cache "$1" >/dev/null 2>&1 || return 1
+  cache=$(python3 "$HERE/model_catalog.py" cache-root "$1") || return 1
+  local snapshots=("$cache/hub/models--${1//\//--}/snapshots/"*/)
   echo "${snapshots[-1]}"
 }
 
@@ -257,16 +382,8 @@ weights_bytes() {
 # is still downloading would otherwise start, fail minutes in, and restart.
 downloaded() {
   local snapshot
-  snapshot=$(snapshot "$1")
-  [[ -f $snapshot/config.json ]] || return 1
-  [[ -f $snapshot/model.safetensors.index.json ]] || { [[ -f $snapshot/model.safetensors ]]; return; }
-  python3 - "$snapshot" <<'PY'
-import json, sys
-from pathlib import Path
-snapshot = Path(sys.argv[1])
-shards = set(json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"].values())
-sys.exit(any(not (snapshot / shard).exists() for shard in shards))
-PY
+  snapshot=$(snapshot "$1") || return 1
+  python3 "$HERE/model_catalog.py" complete "$snapshot"
 }
 
 # Refuse up front instead of letting vLLM fail minutes into loading: the model's
@@ -275,6 +392,19 @@ PY
 # (small VRAM in the BIOS), that RAM must actually be free.
 check_fits() {
   local name=$1 share=$2 repo=$3 model other used=0
+  python3 "$HERE/model_catalog.py" check-runtime "$name" "$IMAGE" || return 1
+  if [[ -n ${LOCAL_LLM_MOE_PROFILE_DIR:-} ]]; then
+    [[ $name == nemotron-3.5-lightning-30b-a3b ]] || {
+      echo 'MoE profile experiments are scoped to Nemotron 3.5' >&2; return 1;
+    }
+    python3 "$HERE/model_catalog.py" check-moe-profile "$LOCAL_LLM_MOE_PROFILE_DIR" || return 1
+  fi
+  local checkpoint
+  if ! python3 "$HERE/model_catalog.py" contains "$name"; then
+    python3 "$HERE/model_catalog.py" check-cache "$repo" || return 1
+  fi
+  checkpoint=$(snapshot "$repo") || return 1
+  python3 "$HERE/model_catalog.py" check-storage "$checkpoint" || return 1
   if ! downloaded "$repo"; then
     echo "$name is not (fully) downloaded yet; ./download.sh fetches it" >&2
     return 1
@@ -290,12 +420,16 @@ check_fits() {
   free=$(awk '/^MemAvailable:/ { print $2 * 1024 }' /proc/meminfo)
   awk -v name="$name" -v share="$share" -v used="$used" -v budget="$MEMORY_BUDGET" \
       -v total="$(gpu_bytes)" -v weights="$(weights_bytes "$repo")" -v room="$WORKING_ROOM_GB" \
+      -v kv="$(python3 "$HERE/model_catalog.py" kv-bytes "$repo")" \
       -v vram="${vram:-0}" -v free="$free" '
     BEGIN {
       gb = 1024 ^ 3
-      if (share * total < weights + room * gb) {
+      # The room holds a small KV cache. A full-context request needs kv, plus
+      # 1.5 GB that every start on 2026-11-16 used beyond weights and cache.
+      need = weights + (kv + 1.5 * gb > room * gb ? kv + 1.5 * gb : room * gb)
+      if (share * total < need) {
         printf "%s does not fit: it needs about %.0f GB, its %.2f share is %.0f of %.0f GB\n",
-          name, weights / gb + room, share, share * total / gb, total / gb
+          name, need / gb, share, share * total / gb, total / gb
         exit 1
       }
       if (vram < 2 * gb && share * total > free - room * gb) {
@@ -337,7 +471,7 @@ wait_until_ready() {
 # loading makes it see too little. Containers must not inherit the lock (9>&-),
 # or their podman monitor keeps holding it for as long as they run.
 up() {
-  local wanted=("$@") model name port failed=0
+  local wanted=("$@") model name port checkpoint failed=0
   for name in "${wanted[@]}"; do known "$name"; done
   if [[ ${#wanted[@]} -eq 0 ]]; then
     [[ -s $WANTED_FILE ]] && mapfile -t wanted <"$WANTED_FILE"
@@ -351,15 +485,24 @@ up() {
     name=$(field "$model" 1)
     port=$(field "$model" 2)
     [[ " ${wanted[*]} " =~ " $name " ]] || continue
-    running "$name" && { want "$name"; continue; }
+    running "$name" && { [[ $name == *-copy ]] || want "$name"; continue; }
     check_fits "$name" "$(field "$model" 3)" "$(field "$model" 4)" || { failed=1; continue; }
-    want "$name"
+    # LOCAL_LLM_EXTRA_FLAGS adds vLLM flags for one start, to compare a setting
+    # before it becomes a model's default. Like the flags column it is split
+    # at spaces, so a JSON value must not contain any.
+    # shellcheck disable=SC2046,SC2086
+    python3 "$HERE/model_catalog.py" check-flags "$name" $(field "$model" 5) ${LOCAL_LLM_EXTRA_FLAGS:-} || { failed=1; continue; }
+    [[ $name == *-copy ]] || want "$name"
+    checkpoint=$(field "$model" 4)
+    if python3 "$HERE/model_catalog.py" contains "$name"; then
+      checkpoint=$(python3 "$HERE/model_catalog.py" serve-path "$(field "$model" 4)") || { failed=1; continue; }
+    fi
     # shellcheck disable=SC2046  # the flags column is meant to split into words
-    run_container "$name" vllm serve "$(field "$model" 4)" \
+    run_container "$name" vllm serve "$checkpoint" \
       --served-model-name "$name" \
       --host 127.0.0.1 --port "$port" \
       --gpu-memory-utilization "$(field "$model" 3)" \
-      $(field "$model" 5)
+      $(field "$model" 5) ${LOCAL_LLM_EXTRA_FLAGS:-}
     wait_until_ready "$name" "$port" || failed=1
   done
   return $failed
@@ -393,17 +536,20 @@ install_services() {
 }
 
 # For control.py and other tools: what can run, and how much of the GPU each takes.
-config() {
+raw_config() {
   local model sep="" ready
   printf '{"budget": %s, "models": [' "$MEMORY_BUDGET"
   for model in "${MODELS[@]}"; do
     downloaded "$(field "$model" 4)" && ready=true || ready=false
-    printf '%s{"name": "%s", "port": %s, "share": %s, "repo": "%s", "downloaded": %s}' "$sep" \
-      "$(field "$model" 1)" "$(field "$model" 2)" "$(field "$model" 3)" "$(field "$model" 4)" "$ready"
+    printf '%s{"name": "%s", "port": %s, "share": %s, "repo": "%s", "downloaded": %s, "fast_kernels": %s}' "$sep" \
+      "$(field "$model" 1)" "$(field "$model" 2)" "$(field "$model" 3)" "$(field "$model" 4)" "$ready" \
+      "$(fast_kernel_mode "$(field "$model" 1)")"
     sep=", "
   done
   printf ']}\n'
 }
+
+config() { raw_config | python3 "$HERE/model_catalog.py" enrich; }
 
 down() {
   local names
@@ -438,7 +584,8 @@ if not fresh:
     sys.exit()
 for model in json.loads(sys.argv[2])["models"]:
     state = stats["model_states"].get(model["name"], {"state": "unknown"})
-    print(f"{model['name']}: {state['state']}")
+    detail = f": {state['reason']}" if state.get("reason") else ""
+    print(f"{model['name']}: {state['state']}{detail}")
 for problem in stats["problems"]:
     print(f"{problem['severity']}: {problem['message']}")
 PY
@@ -452,6 +599,7 @@ PY
     web) shift; web "$@" ;;
     install) install_services ;;
     config) config ;;
+    usage) shift; python3 "$HERE/model_usage.py" "$@" ;;
     *) sed -n '2,20p' "$0"; exit 1 ;;
   esac
 }

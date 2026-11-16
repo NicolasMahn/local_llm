@@ -36,6 +36,8 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from health import model_start_error
+
 HERE = Path(__file__).resolve().parent
 LLM = str(HERE / "llm")
 SOCKET = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "local-llm/control.sock"
@@ -195,6 +197,14 @@ class Handler(BaseHTTPRequestHandler):
             if not states:
                 return self.refuse(HTTPStatus.SERVICE_UNAVAILABLE,
                                    "The monitor is not running, so it is unknown what runs; see ./llm install")
+            # Refuse hard blockers before interrupting any healthy neighbour.
+            # Memory admission remains in llm after the requested stops finish.
+            if reason := model_start_error(name):
+                return self.refuse(HTTPStatus.CONFLICT, f"{name} cannot start: {reason}")
+            target = next(model for model in models["models"] if model["name"] == name)
+            if not target["downloaded"]:
+                return self.refuse(HTTPStatus.CONFLICT,
+                                   f"{name} is not (fully) downloaded yet; ./download.sh {name} fetches it")
             stopping = to_stop(name, models, states)
             if stopping is None:
                 return self.refuse(HTTPStatus.CONFLICT, f"{name} does not fit in the GPU memory budget even alone")

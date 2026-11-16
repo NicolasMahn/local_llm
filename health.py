@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -18,13 +19,167 @@ from pathlib import Path
 
 GIB = 1024 ** 3
 BUSY_WITHOUT_WORK = 300  # seconds of a busy GPU with nothing to do before it counts
+NO_BREAK = 3600  # seconds a model may answer without a moment idle before it looks stuck
 RAM_LOW_GB = 4
 HOT_C = 95
+DISK_LOW_GB = 25
+DISK_CRITICAL_GB = 4
 FIRST_START_LIMIT = 90 * 60  # seconds; a model with no start on record gets this long
 TERMINATED = "terminated"  # a container's reason when a signal from outside ended it
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
 PODMAN_PERSIST = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "libpod/tmp/persist"
+# The public name ./llm web serves; no file, no way in from outside.
+WEB_NAME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "local-llm/web-name"
+NAME_CHECK_EVERY = 600  # seconds; DNS changes slowly and a lookup can hang for a while
+STORAGE_CHECK_EVERY = 30
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "local-llm"
+STORAGE_CONFIG = CONFIG_DIR / "storage.json"
+HF_CACHE = Path.home() / ".cache/huggingface"
+
+
+def _storage_paths(config):
+    try:
+        entries = json.loads(Path(config).read_text())["paths"]
+        if not isinstance(entries, list) or any(
+                not isinstance(entry, dict) or not all(isinstance(entry.get(key), str) and entry[key]
+                                                     for key in ("path", "mount", "uuid"))
+                or not Path(entry["path"]).is_absolute() or not Path(entry["mount"]).is_absolute()
+                for entry in entries):
+            raise ValueError("expected absolute path, mount and UUID for each storage path")
+        return entries, None
+    except FileNotFoundError:
+        return [], None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [], f"Cannot read storage configuration {config}: {exc}"
+
+
+def _mount_error(entry):
+    mount = Path(entry["mount"])
+    try:
+        # Looking at mountinfo first avoids walking into an absent systemd
+        # automount, which could otherwise block every monitor sample.
+        mounted = []
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields, filesystem = line.split(" - ", 1)
+            fields = fields.split()
+            target = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+            if Path(target) == mount and filesystem.split()[0] != "autofs":
+                mounted.append(fields[2])
+        if not mounted:
+            return f"Required storage is not mounted at {mount} (UUID {entry['uuid']}); reconnect/mount the drive before starting models"
+        device = (Path("/dev/disk/by-uuid") / entry["uuid"]).stat().st_rdev
+        identity = f"{os.major(device)}:{os.minor(device)}"
+        if identity not in mounted:
+            return f"Wrong drive mounted at {mount}; expected UUID {entry['uuid']}"
+    except (OSError, ValueError, IndexError) as exc:
+        return f"Cannot verify storage at {mount} (UUID {entry['uuid']}): {exc}"
+    return None
+
+
+def storage_error(path, config=STORAGE_CONFIG):
+    """Refuse access through a missing or wrong external drive before stat/open.
+
+    Callers may check a not-yet-created download directory. Existing configured
+    storage roots still have to exist, and broken symlinks are never writable
+    fallback locations.
+    """
+    entries, error = _storage_paths(config)
+    if error:
+        return error
+    path = Path(os.path.abspath(path))
+    for entry in entries:
+        root, mount = Path(entry["path"]), Path(entry["mount"])
+        if path == root or root in path.parents or path == mount or mount in path.parents:
+            if error := _mount_error(entry):
+                return error
+            if not root.is_dir():
+                return f"Required storage directory {root} is missing"
+    if path.is_symlink() and not path.exists():
+        return f"Storage link {path} points to a missing directory; reconnect its drive"
+    return None
+
+
+def model_start_error(name):
+    from model_catalog import MODELS, cache_for_model, moe_profile_error, runtime_error, snapshot
+
+    try:
+        path = snapshot(MODELS[name]["repo"]) if name in MODELS else (cache_for_model(name) or HF_CACHE)
+        if reason := storage_error(path):
+            return reason
+        if name not in MODELS and path != HF_CACHE and not path.is_dir():
+            return f"Configured model cache {path} is missing"
+        if name == "nemotron-3.5-lightning-30b-a3b" and os.environ.get("LOCAL_LLM_MOE_PROFILE_DIR"):
+            if reason := moe_profile_error(os.environ["LOCAL_LLM_MOE_PROFILE_DIR"]):
+                return reason
+        return runtime_error(name, os.environ.get("LOCAL_LLM_IMAGE", "localhost/local-llm:latest"))
+    except (OSError, ValueError) as exc:
+        return str(exc)
+
+
+def storage_problems(config_dir=CONFIG_DIR, cache=HF_CACHE, root=Path("/")):
+    config_dir, cache, root = Path(config_dir), Path(cache), Path(root)
+    config = config_dir / "storage.json"
+    entries, error = _storage_paths(config)
+    problems = []
+    seen_errors = set()
+    paths = [root]
+
+    def add_error(message):
+        if message not in seen_errors:
+            problems.append({"severity": "error", "message": message, "since": None})
+            seen_errors.add(message)
+
+    if error:
+        add_error(error)
+    for entry in entries:
+        error = _mount_error(entry)
+        if error:
+            add_error(error)
+        elif not Path(entry["path"]).is_dir():
+            add_error(f"Required storage directory {entry['path']} is missing")
+        else:
+            paths.append(Path(entry["path"]))
+    # Check the link itself before following it; a healthy configured archive
+    # was already verified above, and an absent automount must not be touched.
+    guarded_cache = any(cache == Path(entry["path"]) for entry in entries)
+    if not guarded_cache:
+        if cache.is_symlink() and not cache.exists():
+            add_error(f"Storage link {cache} points to a missing directory; reconnect its drive")
+        elif cache.is_dir():
+            paths.append(cache)
+    directory_file = config_dir / "model-dir"
+    try:
+        if directory_file.exists():
+            value = directory_file.read_text().strip()
+            if not value or not Path(value).is_absolute():
+                add_error(f"Model storage configuration {directory_file} must contain an absolute directory")
+            else:
+                directory = Path(value)
+                if error := storage_error(directory, config):
+                    add_error(error)
+                elif not directory.is_dir():
+                    add_error(f"Configured model directory {directory} is missing; reconnect its drive before starting models")
+                else:
+                    paths.append(directory)
+    except OSError as exc:
+        add_error(f"Cannot read model storage configuration {directory_file}: {exc}")
+    devices = set()
+    for path in paths:
+        try:
+            device = path.stat().st_dev
+            if device in devices:
+                continue
+            devices.add(device)
+            stats = os.statvfs(path)
+            free = stats.f_bavail * stats.f_frsize / GIB
+            if free < DISK_LOW_GB:
+                severity = "error" if free < DISK_CRITICAL_GB else "warning"
+                problems.append({"severity": severity, "message": f"Storage at {path} is almost full: {free:.1f} GiB available; "
+                                 "archive files before downloading more models", "since": None})
+        except OSError as exc:
+            add_error(f"Cannot check free space at {path}: {exc}")
+    return problems
 
 
 def iso(epoch):
@@ -76,6 +231,22 @@ def exposed_model_ports():
     return exposed
 
 
+def foreign_ipv6(name):
+    """The IPv6 addresses `name` resolves to that are not this computer's.
+
+    Browsers try IPv6 first. The MyFRITZ name of the router itself resolves to
+    the FRITZ!Box's own address, which answers with its login page instead of
+    the gateway (2026-11-09); the device name must point here.
+    """
+    try:
+        resolved = {info[4][0] for info in socket.getaddrinfo(name, 443, socket.AF_INET6, socket.SOCK_STREAM)}
+        out = subprocess.run(["ip", "-6", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []  # No IPv6 for the name, or no answer: IPv4 still gets through.
+    own = set(re.findall(r"inet6 ([0-9a-f:]+)/", out))
+    return sorted(resolved - own)
+
+
 def meminfo():
     return {
         line.split(":")[0]: int(line.split()[1]) * 1024
@@ -113,6 +284,7 @@ class Containers:
 
     def __init__(self):
         self._reasons = {}  # container id -> last error line
+        self._several_queues = {}  # container id -> started without one GPU queue
 
     def all(self):
         try:
@@ -123,6 +295,21 @@ class Containers:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return {}
         return {entry["Names"][0].removeprefix("llm-"): entry for entry in listed}
+
+    def several_gpu_queues(self, container):
+        """Whether a model runs without the one GPU queue ./llm starts it with.
+
+        With the runtime's default of four, a loaded model keeps the GPU at
+        100% without requests (2026-11-14)."""
+        key = container["Id"]
+        if key not in self._several_queues:
+            try:
+                out = subprocess.run(["podman", "inspect", "--format", "{{json .Config.Env}}", key],
+                                     capture_output=True, text=True, timeout=15).stdout
+                self._several_queues[key] = "GPU_MAX_HW_QUEUES=1" not in json.loads(out)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                return False
+        return self._several_queues[key]
 
     def reason(self, container):
         """Why a container ended: TERMINATED when it was stopped from outside,
@@ -157,17 +344,29 @@ class Health:
         self.containers = Containers()
         self.states = {}
         self.busy_since = None
+        self.answering_since = {}  # model -> when it last went from idle to answering
+        self.name_checked = 0
+        self.name_problem = None
+        self.storage_checked = None
+        self.storage_problems = []
+        self.model_start_errors = {}
 
-    def check(self, now, models_up, requests, gpu, temperature_c):
+    def check(self, now, models_up, requests, gpu, temperature_c, answering=None):
         """Model states and problems for one sample.
 
-        models_up maps each model to whether it answered; gpu holds busy percent
-        and the VRAM/GTT sizes in bytes.
+        models_up maps each model to whether it answered; answering to how many
+        requests it holds; gpu holds busy percent and the VRAM/GTT sizes in bytes.
         """
         problems = []
 
         def problem(severity, message, since=None):
             problems.append({"severity": severity, "message": message, "since": since and iso(since)})
+
+        if self.storage_checked is None or now - self.storage_checked >= STORAGE_CHECK_EVERY:
+            self.storage_problems = storage_problems()
+            self.model_start_errors = {name: model_start_error(name) for name in models_up}
+            self.storage_checked = now
+        problems.extend(self.storage_problems)
 
         containers = self.containers.all()
         states = {}
@@ -201,6 +400,8 @@ class Health:
                     problem("error", f"{name} crashed: {reason}", container.get("ExitedAt"))
             else:
                 state = {"state": "off"}
+            if state["state"] == "off" and self.model_start_errors.get(name):
+                state["reason"] = self.model_start_errors[name]
             if container and container.get("Restarts"):
                 problem("warning", f"{name} crashed and was restarted {container['Restarts']}×")
             states[name] = state
@@ -229,6 +430,30 @@ class Health:
             problem("error", f"A model listens on the network without a key ({len(exposed)} port(s), e.g. "
                     f"{exposed[0]}); restart it with ./llm or the website so it binds to localhost only")
 
+        # A request whose client is long gone can keep a model going for hours
+        # (2026-10-29, before the gateway stopped those); from outside it only
+        # shows as a model that never gets a moment idle.
+        for name, count in (answering or {}).items():
+            if not count:
+                self.answering_since.pop(name, None)
+                continue
+            since = self.answering_since.setdefault(name, now)
+            if now - since > NO_BREAK:
+                problem("warning", f"{name} has been answering without a break for {duration(now - since)}; "
+                        "a request may be stuck in a loop (./llm gateway ends those whose client is gone)", since)
+
+        if now - self.name_checked > NAME_CHECK_EVERY:
+            self.name_checked = now
+            self.name_problem = None
+            name = WEB_NAME.read_text().strip() if WEB_NAME.exists() else ""
+            foreign = name and foreign_ipv6(name)
+            if foreign:
+                self.name_problem = (f"{name} points over IPv6 at {foreign[0]}, not at this computer, so "
+                                     "browsers may get another machine (at home: the FRITZ!Box login); "
+                                     "see \"From the internet\" in the README")
+        if self.name_problem:
+            problem("warning", self.name_problem)
+
         if self.kernel.hangs:
             last = self.kernel.hangs[-1]
             severity = "error" if now - last < 1800 else "warning"
@@ -240,8 +465,14 @@ class Health:
         if (gpu["busy"] or 0) >= 90 and not requests and not starting:
             self.busy_since = self.busy_since or now
             if now - self.busy_since > BUSY_WITHOUT_WORK:
+                spinning = [name for name, container in containers.items()
+                            if name in models_up and container["State"] == "running"
+                            and self.containers.several_gpu_queues(container)]
+                advice = (f"{', '.join(spinning)} was started without GPU_MAX_HW_QUEUES=1, which can keep an "
+                          "idle model spinning; ./llm stop and ./llm up restart it with one queue"
+                          if spinning else "inspect GPU clients and model logs before restarting anything")
                 problem("warning", f"The GPU has been busy for {duration(now - self.busy_since)} "
-                        "with nothing to do; a reboot clears this", self.busy_since)
+                        f"with no model requests; {advice}", self.busy_since)
         else:
             self.busy_since = None
 
@@ -250,7 +481,7 @@ class Health:
             problem("error", f"RAM is almost full: {memory['MemAvailable'] / GIB:.1f} GB free")
         if memory["SwapTotal"] and memory["SwapFree"] < memory["SwapTotal"] / 2:
             problem("warning", f"{(memory['SwapTotal'] - memory['SwapFree']) / GIB:.1f} GB of swap in use; "
-                    "the system is short of RAM")
+                    f"{memory['MemAvailable'] / GIB:.1f} GB RAM available")
         if gpu["gtt_total"] > memory["MemTotal"] + GIB:
             problem("error", f"The GPU may borrow {gpu['gtt_total'] / GIB:.0f} GB, but the system only has "
                     f"{memory['MemTotal'] / GIB:.0f} GB of RAM; is the BIOS still reserving VRAM?")

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Download the model weights into the Hugging Face cache. Safe to re-run:
-# finished files are skipped and partial ones resume.
-set -u
-for repo in RedHatAI/Qwen3.8-27B-INT4 cyankiwi/gemma-4-26B-A4B-it-qat-AWQ-INT4 google/gemma-4-12B-it-qat-w4a16-ct \
-    google/gemma-4-31B-it-qat-w4a16-ct RedHatAI/Muse-Glimmer-30B-INT4; do
-  echo "START $repo $(date -Is)"
-  hf download "$repo" >/dev/null && echo "DONE $repo $(date -Is)" || echo "FAIL $repo $(date -Is)"
-done
+# Fetch all configured weights, or only the named models. Finished files are
+# reused and interrupted transfers resume; pinned additions retain their revision.
+set -euo pipefail
+HERE=$(dirname "$(readlink -f "$0")")
+exec python3 "$HERE/download_models.py" "$@"

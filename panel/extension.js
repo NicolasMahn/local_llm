@@ -282,6 +282,7 @@ class StatusButton extends PanelMenu.Button {
         for (const [name, model] of this._models) {
             const container = containers.get(`llm-${name}`);
             const live = stats?.models[name];
+            const observed = stats?.model_states?.[name];
             const up = Boolean(live?.up);
             const failed = !up && container?.state !== 'running' &&
                 !this._starting.has(name) && container && container.exitCode !== 0;
@@ -311,6 +312,8 @@ class StatusButton extends PanelMenu.Button {
             } else if (failed) {
                 model.error ??= await this._lastError(name);
                 [state, detail] = [State.FAILED, model.error];
+            } else if (observed?.reason) {
+                [state, detail] = [State.FAILED, observed.reason];
             } else {
                 [state, detail] = [State.OFF, 'off'];
             }
