@@ -37,6 +37,11 @@ vllm:request_success_created{finished_reason="stop"} 1234.0
         with self.assertRaisesRegex(ValueError, "do not include"):
             parse_backend_metrics('vllm:num_requests_running 0.0')
 
+    def test_a_llama_cpp_peer_is_observed_instead_of_stopping_the_benchmark(self):
+        parsed = parse_backend_metrics("llamacpp:n_decode_total 1763\n"
+                                       "llamacpp:requests_processing 0\nllamacpp:requests_deferred 0\n")
+        self.assertEqual(parsed, {"running": 0, "waiting": 0, "completed": 1763})
+
     def test_a_clean_trial_is_accepted_and_short_external_work_is_detected_by_counters(self):
         before = [{"running": 0, "waiting": 0, "completed": 10},
                   {"running": 0, "waiting": 0, "completed": 20}]

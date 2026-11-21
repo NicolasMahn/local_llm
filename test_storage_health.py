@@ -213,6 +213,13 @@ def test_a_silent_kill_is_named_as_likely_out_of_memory(monkeypatch):
     assert container_reason(monkeypatch, log, exit_code=1) == "exit code 1, see ./llm logs"
 
 
+def test_a_kill_while_serving_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.10.700.413 I srv  server_run_i: model loaded\n"
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n")
+    assert "lack of memory" in container_reason(monkeypatch, log, exit_code=137)
+
+
 def test_llama_server_on_a_public_address_is_reported_like_vllm(monkeypatch):
     listening = ('LISTEN 0 512 127.0.0.1:8026 0.0.0.0:* users:(("llama-server",pid=1,fd=3))\n'
                  'LISTEN 0 512 0.0.0.0:8027 0.0.0.0:* users:(("llama-server",pid=2,fd=3))\n'

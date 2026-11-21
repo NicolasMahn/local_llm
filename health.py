@@ -30,6 +30,7 @@ ERROR_LINE = re.compile(r"\w*Error: ")  # Python's exceptions, from vLLM
 # llama.cpp marks errors with " E "; the first of its last start is the cause,
 # the ones after it only report that loading failed.
 LLAMA_CPP_START = "llama_server: initializing"
+LLAMA_CPP_LOADED = "server_run_i: model loaded"
 LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
@@ -330,7 +331,10 @@ class Containers:
                 return TERMINATED
             errors = [line for line in log.splitlines()
                       if ERROR_LINE.search(line) and "Engine core initialization failed" not in line]
-            llama_cpp = LLAMA_CPP_ERROR.search(log.rsplit(LLAMA_CPP_START, 1)[-1]) if LLAMA_CPP_START in log else None
+            # Only errors while loading name the cause: once a model serves,
+            # llama.cpp also logs failed requests as errors.
+            loading = log.rsplit(LLAMA_CPP_START, 1)[-1].split(LLAMA_CPP_LOADED, 1)[0]
+            llama_cpp = LLAMA_CPP_ERROR.search(loading) if LLAMA_CPP_START in log else None
             if llama_cpp:
                 self._reasons[key] = llama_cpp.group(1)[:160]
             elif errors:

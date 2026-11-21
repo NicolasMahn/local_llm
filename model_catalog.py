@@ -311,10 +311,12 @@ def llama_flags(model):
     # Batches of 512 keep each GPU call short, as for vLLM (README). One KV
     # pool shared by all slots lets a single request use the whole context.
     # --jinja applies the model's own chat template, which handles tools and
-    # thinking; --metrics feeds the monitor.
+    # thinking; --metrics feeds the monitor. --cache-ram 0: llama-server
+    # otherwise keeps up to 8 GiB of old prompts in RAM, outside the measured
+    # memory; each slot still reuses its own conversation's prompt.
     return ["--ctx-size", str(model["context"]), "--parallel", str(model["max_seqs"]), "--kv-unified",
             "--batch-size", "512", "--ubatch-size", "512", "--n-gpu-layers", "999",
-            "--flash-attn", "on", "--jinja", "--metrics", "--no-webui"]
+            "--flash-attn", "on", "--cache-ram", "0", "--jinja", "--metrics", "--no-webui"]
 
 
 def serve_args(name):
@@ -465,8 +467,12 @@ def flags_error(name, flags):
 
     model = MODELS.get(name.removesuffix("-copy"), {})
     if engine(model) == "llama.cpp":
+        # llama.cpp also takes the last value, under the long or the short name.
+        short = {"-c": "--ctx-size", "-np": "--parallel", "-b": "--batch-size",
+                 "-ub": "--ubatch-size", "-cram": "--cache-ram"}
+        flags = [short.get(flag, flag) for flag in flags]
         measured = dict(zip(llama_flags(model), llama_flags(model)[1:]))
-        for flag in ("--ctx-size", "--parallel", "--batch-size", "--ubatch-size"):
+        for flag in ("--ctx-size", "--parallel", "--batch-size", "--ubatch-size", "--cache-ram"):
             if last(flag) != measured[flag]:
                 return (f"{name} was measured with {flag} {measured[flag]}, not {last(flag)}; "
                         "llama.cpp ignores the memory share and undercounts what other "

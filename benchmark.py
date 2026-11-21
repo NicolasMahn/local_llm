@@ -18,6 +18,11 @@ from pathlib import Path
 def parse_backend_metrics(text):
     names = {"vllm:num_requests_running": "running", "vllm:num_requests_waiting": "waiting",
              "vllm:request_success_total": "completed"}
+    if "llamacpp:" in text:
+        # llama.cpp counts no finished requests; its decode steps still show
+        # whether a peer worked during a trial.
+        names = {"llamacpp:requests_processing": "running", "llamacpp:requests_deferred": "waiting",
+                 "llamacpp:n_decode_total": "completed"}
     result = {}
     for line in text.splitlines():
         if not line or line.startswith("#"):

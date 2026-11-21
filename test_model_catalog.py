@@ -476,5 +476,6 @@ def test_a_llama_cpp_model_refuses_settings_whose_memory_was_not_measured():
     # 262k took over 44 GB where llama.cpp projected 32, and the kernel killed it.
     assert "--ctx-size 65536, not 262144" in catalog.flags_error("inkling-2-mini", [*measured, "--ctx-size", "262144"])
     assert "--parallel" in catalog.flags_error("inkling-2-mini-copy", [*measured, "--parallel", "8"])
+    assert "not 262144" in catalog.flags_error("inkling-2-mini", [*measured, "-c", "262144"])
     assert catalog.memory_bytes("inkling-2-mini") > 26 * catalog.GIB
     assert catalog.memory_bytes("granite-4.2-30b") == 0
