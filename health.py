@@ -33,6 +33,11 @@ LLAMA_CPP_START = "llama_server: initializing"
 LLAMA_CPP_LOADED = "server_run_i: model loaded"
 KILLED = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
 LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
+LLAMA_CPP_INFO = re.compile(r"^\S+ I .*$", re.M)
+# ggml's abort, written straight to stderr; it can be the only line a GPU
+# fault leaves, because llama.cpp's own log is written by a thread that dies
+# with the process.
+GGML_ABORT = re.compile(r"^\S*?([\w.-]+:\d+): (.*)$", re.M)
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
 PODMAN_PERSIST = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "libpod/tmp/persist"
@@ -349,13 +354,19 @@ class Containers:
     @staticmethod
     def llama_cpp_reason(log, exit_code):
         """While loading, the first error is the cause. While serving, llama.cpp
-        also logs failed requests as errors, so only the last one can be a
-        crash, and a silent kill outranks it."""
+        also logs failed requests as errors, and goes on logging after them;
+        a crash is what ends the log, after its last ordinary line. A silent
+        kill outranks it."""
         loading, _, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
         if first := LLAMA_CPP_ERROR.search(loading):
             return first.group(1)[:160]
         if exit_code == 137:
             return KILLED
+        ordinary = list(LLAMA_CPP_INFO.finditer(serving))
+        serving = serving[ordinary[-1].end():] if ordinary else serving
+        if abort := GGML_ABORT.findall(serving):
+            place, message = abort[-1]
+            return f"{message} ({place})"[:160]
         if crash := LLAMA_CPP_ERROR.findall(serving):
             return crash[-1][:160]
         return f"exit code {exit_code}, see ./llm logs"

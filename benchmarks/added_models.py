@@ -222,6 +222,8 @@ def deep_messages(case, lines):
 
 def deep_lines(url, model, target=DEEP_TOKENS):
     """Size the inventory in the model's own tokens: tokenizers differ by a third."""
+    # Sizing is the first request, so a target the trials cannot audit stops here.
+    require_completion_count(model, metrics(url))
     def count(lines):
         body = json.dumps({"model": model, "messages": deep_messages("deep_decode", lines)}).encode()
         req = urllib.request.Request(url.removesuffix("/v1") + "/tokenize", data=body,

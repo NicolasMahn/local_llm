@@ -227,6 +227,19 @@ def test_a_gpu_fault_while_serving_shows_its_error(monkeypatch):
            "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
            "0.30.000.000 E ggml_cuda_error: ROCm error: unspecified launch failure\n")
     assert container_reason(monkeypatch, log, exit_code=134) == "ggml_cuda_error: ROCm error: unspecified launch failure"
+    # The abort can be all that reaches the log.
+    aborted = log.rsplit("0.30", 1)[0] + "/src/ggml/src/ggml-cuda/ggml-cuda.cu:114: ROCm error\n"
+    assert container_reason(monkeypatch, aborted, exit_code=134) == "ROCm error (ggml-cuda.cu:114)"
+
+
+def test_a_crash_that_logs_no_error_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.10.700.413 I srv  server_run_i: model loaded\n"
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
+           "0.20.000.100 I srv  update_slots: all slots are idle\n")
+    assert container_reason(monkeypatch, log, exit_code=139) == "exit code 139, see ./llm logs"
+    asserted = log + "/src/ggml/src/ggml-cuda/inkling2.cu:412: GGML_ASSERT(n > 0) failed\n"
+    assert container_reason(monkeypatch, asserted, exit_code=134) == "GGML_ASSERT(n > 0) failed (inkling2.cu:412)"
 
 
 def test_llama_server_on_a_public_address_is_reported_like_vllm(monkeypatch):
