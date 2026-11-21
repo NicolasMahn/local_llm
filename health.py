@@ -31,6 +31,7 @@ ERROR_LINE = re.compile(r"\w*Error: ")  # Python's exceptions, from vLLM
 # the ones after it only report that loading failed.
 LLAMA_CPP_START = "llama_server: initializing"
 LLAMA_CPP_LOADED = "server_run_i: model loaded"
+KILLED = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
 LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
@@ -329,24 +330,35 @@ class Containers:
             if "KeyboardInterrupt: terminated" in log:
                 self._reasons[key] = TERMINATED
                 return TERMINATED
+            if LLAMA_CPP_START in log:
+                self._reasons[key] = self.llama_cpp_reason(log, container["ExitCode"])
+                return self._reasons[key]
             errors = [line for line in log.splitlines()
                       if ERROR_LINE.search(line) and "Engine core initialization failed" not in line]
-            # Only errors while loading name the cause: once a model serves,
-            # llama.cpp also logs failed requests as errors.
-            loading = log.rsplit(LLAMA_CPP_START, 1)[-1].split(LLAMA_CPP_LOADED, 1)[0]
-            llama_cpp = LLAMA_CPP_ERROR.search(loading) if LLAMA_CPP_START in log else None
-            if llama_cpp:
-                self._reasons[key] = llama_cpp.group(1)[:160]
-            elif errors:
+            if errors:
                 line = errors[-1]
                 self._reasons[key] = line[ERROR_LINE.search(line).start():].split(". ")[0][:160]
             elif container["ExitCode"] == 137:
-                # Killed without a word in the log: by the kernel for want of RAM
-                # (inkling-2-mini, 2026-11-21), or by a stop that timed out.
-                self._reasons[key] = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
+                # Killed without a word in the log: by the kernel for want of RAM,
+                # or by a stop that timed out.
+                self._reasons[key] = KILLED
             else:
                 self._reasons[key] = f"exit code {container['ExitCode']}, see ./llm logs"
         return self._reasons[key]
+
+    @staticmethod
+    def llama_cpp_reason(log, exit_code):
+        """While loading, the first error is the cause. While serving, llama.cpp
+        also logs failed requests as errors, so only the last one can be a
+        crash, and a silent kill outranks it."""
+        loading, _, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
+        if first := LLAMA_CPP_ERROR.search(loading):
+            return first.group(1)[:160]
+        if exit_code == 137:
+            return KILLED
+        if crash := LLAMA_CPP_ERROR.findall(serving):
+            return crash[-1][:160]
+        return f"exit code {exit_code}, see ./llm logs"
 
 
 class Health:

@@ -19,10 +19,10 @@ def parse_backend_metrics(text):
     names = {"vllm:num_requests_running": "running", "vllm:num_requests_waiting": "waiting",
              "vllm:request_success_total": "completed"}
     if "llamacpp:" in text:
-        # llama.cpp counts no finished requests; its decode steps still show
-        # whether a peer worked during a trial.
+        # llama.cpp counts no finished requests, only decode steps: enough to
+        # see a peer work during a trial, not to audit a trial of its own.
         names = {"llamacpp:requests_processing": "running", "llamacpp:requests_deferred": "waiting",
-                 "llamacpp:n_decode_total": "completed"}
+                 "llamacpp:n_decode_total": "activity"}
     result = {}
     for line in text.splitlines():
         if not line or line.startswith("#"):
@@ -34,6 +34,12 @@ def parse_backend_metrics(text):
     if set(result) != set(names.values()):
         raise ValueError("Backend metrics do not include request gauges and completion counters")
     return result
+
+
+def require_completion_count(name, reading):
+    if "completed" not in reading:
+        raise RuntimeError(f"{name} runs on llama.cpp, which counts no finished requests, so these "
+                           "trials cannot be audited; see benchmarks/inkling-2-mini-2026-11-21.md")
 
 
 def contamination_reasons(before, after, peak_active, expected):
@@ -48,7 +54,10 @@ def contamination_reasons(before, after, peak_active, expected):
             reasons.append(f"{label} was busy after the trial")
         if peak > own:
             reasons.append(f"{label} held more than {own} expected requests")
-        if end["completed"] - start["completed"] != own:
+        if "completed" not in start:
+            if end["activity"] != start["activity"]:
+                reasons.append(f"{label} worked during the trial")
+        elif end["completed"] - start["completed"] != own:
             reasons.append(f"{label} completion count did not match {own} benchmark requests")
     return reasons
 

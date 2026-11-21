@@ -313,7 +313,8 @@ def llama_flags(model):
     # --jinja applies the model's own chat template, which handles tools and
     # thinking; --metrics feeds the monitor. --cache-ram 0: llama-server
     # otherwise keeps up to 8 GiB of old prompts in RAM, outside the measured
-    # memory; each slot still reuses its own conversation's prompt.
+    # memory. A slot still reuses its conversation's prompt until another
+    # conversation needs the room; then that prompt is read again.
     return ["--ctx-size", str(model["context"]), "--parallel", str(model["max_seqs"]), "--kv-unified",
             "--batch-size", "512", "--ubatch-size", "512", "--n-gpu-layers", "999",
             "--flash-attn", "on", "--cache-ram", "0", "--jinja", "--metrics", "--no-webui"]
@@ -467,10 +468,10 @@ def flags_error(name, flags):
 
     model = MODELS.get(name.removesuffix("-copy"), {})
     if engine(model) == "llama.cpp":
-        # llama.cpp also takes the last value, under the long or the short name.
+        # llama.cpp also takes the last value, under the short name or with underscores.
         short = {"-c": "--ctx-size", "-np": "--parallel", "-b": "--batch-size",
                  "-ub": "--ubatch-size", "-cram": "--cache-ram"}
-        flags = [short.get(flag, flag) for flag in flags]
+        flags = [short.get(flag, flag.replace("_", "-") if flag.startswith("--") else flag) for flag in flags]
         measured = dict(zip(llama_flags(model), llama_flags(model)[1:]))
         for flag in ("--ctx-size", "--parallel", "--batch-size", "--ubatch-size", "--cache-ram"):
             if last(flag) != measured[flag]:

@@ -216,8 +216,17 @@ def test_a_silent_kill_is_named_as_likely_out_of_memory(monkeypatch):
 def test_a_kill_while_serving_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
     log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
            "0.10.700.413 I srv  server_run_i: model loaded\n"
-           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n")
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
+           "0.20.100.000 E srv  got exception: ValueError: bad tool schema\n")
     assert "lack of memory" in container_reason(monkeypatch, log, exit_code=137)
+
+
+def test_a_gpu_fault_while_serving_shows_its_error(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.10.700.413 I srv  server_run_i: model loaded\n"
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
+           "0.30.000.000 E ggml_cuda_error: ROCm error: unspecified launch failure\n")
+    assert container_reason(monkeypatch, log, exit_code=134) == "ggml_cuda_error: ROCm error: unspecified launch failure"
 
 
 def test_llama_server_on_a_public_address_is_reported_like_vllm(monkeypatch):

@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from benchmark import answer_token_count, contamination_reasons, parse_backend_metrics, request
+from benchmark import answer_token_count, contamination_reasons, parse_backend_metrics, request, require_completion_count
 from model_catalog import MODELS
 from model_usage import benchmark
 
@@ -129,6 +129,7 @@ class Guard:
             except OSError:
                 if name == self.target:
                     raise RuntimeError(f"Target backend {name} is not reachable")
+        require_completion_count(self.target, readings[self.target])
         return readings
 
     def trial(self, call, count):
