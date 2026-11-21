@@ -1,0 +1,49 @@
+# llama.cpp for the models vLLM cannot run (model_catalog.py, ENGINE_IMAGES),
+# built for the Strix Halo GPU with ROCm.
+#
+# Upstream llama.cpp runs Inkling 2 as thousands of tiny GPU calls per token
+# (ggml-org/llama.cpp#32707). realugbun's inkling2-speed branch fuses them:
+# here that doubled generation and read 2.5x faster behind 8k tokens
+# (README, "Measuring and improving speed"). Both sources are pinned by
+# commit. When upstream has its own fix, drop SPEED and its merge; when either
+# pin changes, change the image tag in model_catalog.py so ./llm up rebuilds.
+FROM registry.fedoraproject.org/fedora:44 AS builder
+
+RUN printf '%s\n' '[amdrocm-stable]' 'name=ROCm 10.0.0' \
+      'baseurl=https://stable.repo.amd.com/rocm/core/packages/rhel10/x86_64' \
+      'enabled=1' 'priority=50' 'gpgcheck=1' \
+      'gpgkey=https://stable.repo.amd.com/rocm/gpg/packages.gpg' >/etc/yum.repos.d/rocm.repo \
+ && dnf -y --nodocs --setopt=install_weak_deps=False install \
+      make gcc gcc-c++ cmake ninja-build git-core amdrocm-core-devel10.0-gfx1151 \
+ && dnf clean all
+
+ENV ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm \
+    PATH=/opt/rocm/bin:/opt/rocm/core/bin:/opt/rocm/core/lib/llvm/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/rocm/core/lib/rocm_sysdeps/lib:/opt/rocm/core/lib
+
+ARG UPSTREAM=e6d624b9a4b95c6b52f5ca384d70b75581f9821a
+ARG SPEED=7669d89977ff6d9d48500951ce4b6a0a5d51ab21
+WORKDIR /src
+RUN git clone --quiet --filter=blob:none https://github.com/ggml-org/llama.cpp.git . \
+ && git checkout --quiet "$UPSTREAM" \
+ && git fetch --quiet https://github.com/realugbun/llama.cpp.git "$SPEED" \
+ && git -c user.name=build -c user.email=build@localhost merge --quiet --no-edit FETCH_HEAD
+
+# Twelve jobs: the HIP kernels take over 1 GB of RAM each to compile, and
+# models may be running next to the build.
+RUN cmake -S . -B build -G Ninja -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151 -DGPU_TARGETS=gfx1151 \
+      -DCMAKE_BUILD_TYPE=Release -DROCM_PATH=/opt/rocm -DHIP_PLATFORM=amd \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF \
+ && cmake --build build -j 12 --target llama-server llama-bench
+
+# The ROCm runtime that is known to work on this computer, pinned by digest;
+# only its llama.cpp is replaced.
+FROM docker.io/kyuz0/amd-strix-halo-toolboxes@sha256:df68e4b6f54689ac4e9e2884197408507d842a7194617a57eefedc8a995d0b8f
+
+ARG UPSTREAM=e6d624b9a4b95c6b52f5ca384d70b75581f9821a
+ARG SPEED=7669d89977ff6d9d48500951ce4b6a0a5d51ab21
+COPY --from=builder /src/build/bin /opt/llama.cpp
+# Ahead of the image's own build in /usr/local, for programs and libraries alike.
+ENV PATH=/opt/llama.cpp:$PATH LD_LIBRARY_PATH=/opt/llama.cpp:$LD_LIBRARY_PATH
+RUN llama-server --version
+LABEL local-llm.llama-cpp.upstream=$UPSTREAM local-llm.llama-cpp.inkling2-speed=$SPEED

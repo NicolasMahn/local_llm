@@ -153,6 +153,7 @@ MODELS = {
         # with a 60k-token prompt. Each step's working memory is 6.5 GB at any
         # context; upstream's ggml-org/llama.cpp#32752 should make longer ones cheaper.
         "context": 65536, "max_seqs": 4, "measured_gib": 26.6,
+        "tuning": "measured on gfx1151 next to a busy gemma-4-31b; fused glue kernels on ROCm; benchmarks/inkling-2-mini-2026-11-21.md",
         # Its template sets thinking with chat_template_kwargs.reasoning_effort,
         # 0.0 to 0.99 (default 0.9); even 0.0 thinks a few sentences.
         "capabilities": {"input": ["text", "image"], "reasoning": True, "thinking_toggle": False,
@@ -160,10 +161,11 @@ MODELS = {
     },
 }
 
-# llama.cpp is not in the vLLM image; this one is built for gfx1151 and pinned
-# by digest, since its tags move with every nightly build.
+# llama.cpp is not in the vLLM image. Containerfile.llama-cpp builds this one,
+# and ./llm up runs that build when the tag is missing; change the tag
+# whenever the Containerfile's pinned sources change.
 ENGINE_IMAGES = {
-    "llama.cpp": "docker.io/kyuz0/amd-strix-halo-toolboxes@sha256:df68e4b6f54689ac4e9e2884197408507d842a7194617a57eefedc8a995d0b8f",
+    "llama.cpp": "localhost/local-llm-llama-cpp:inkling2-speed-20261121",
 }
 
 

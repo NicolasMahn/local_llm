@@ -234,7 +234,7 @@ def test_llama_cpp_models_get_their_files_and_their_own_image(configured_dir, tm
     rows = subprocess.run(["python3", str(Path(catalog.__file__)), "rows"], check=True,
                           capture_output=True, text=True).stdout.splitlines()
     row = next(line.split("|") for line in rows if line.startswith("inkling-2-mini|"))
-    assert row[5] == "llama.cpp" and "@sha256:" in row[6]
+    assert row[5] == "llama.cpp" and row[6] == catalog.ENGINE_IMAGES["llama.cpp"]
     granite = next(line.split("|") for line in rows if line.startswith("granite-4.2-30b|"))
     assert granite[5:] == ["vllm", ""]
 

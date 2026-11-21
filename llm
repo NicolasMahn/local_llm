@@ -500,6 +500,9 @@ up() {
     [[ $name == *-copy ]] || want "$name"
     checkpoint=$(field "$model" 4)
     if [[ $(field "$model" 6) == llama.cpp ]]; then
+      # No build context: the Containerfile fetches its pinned sources itself.
+      podman image exists "$(field "$model" 7)" ||
+        podman build -t "$(field "$model" 7)" - <"$HERE/Containerfile.llama-cpp" || { failed=1; continue; }
       # llama.cpp takes what the model needs rather than a share; the share
       # only books its place in the memory budget.
       # shellcheck disable=SC2046  # both columns are meant to split into words

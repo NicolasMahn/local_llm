@@ -56,7 +56,7 @@ past chats, is its own project, local_llm_chat.
 | `nemotron-3-nano-4b` | NVIDIA's tiny hybrid model, optional thinking and tools; passed every check. ~31 tokens/s (BF16), reads ~3,500 tokens/s. |
 | `granite-4.2-3b` | IBM's tiny dense model, optional thinking and tools. ~32 tokens/s (BF16). |
 | `minicpm5-2b` | the fastest: ~100 tokens/s, ~375 in total at 16 requests; optional thinking and tools. Thinks long on arithmetic. |
-| `inkling-2-mini` | Thinking Machines' looped MoE (26B, 3.4B active); sees pictures, tools, always thinks a little. Served by llama.cpp, since vLLM runs it only on NVIDIA Hopper or newer. 65k context. 7–12 tokens/s and reads ~135 tokens/s, both measured next to a busy `gemma-4-31b`; slow on long prompts (60k tokens took 15 min). |
+| `inkling-2-mini` | Thinking Machines' looped MoE (26B, 3.4B active); sees pictures, tools, always thinks a little. Served by llama.cpp, since vLLM runs it only on NVIDIA Hopper or newer. 65k context. ~19 tokens/s, reads ~430 tokens/s behind 8k tokens and ~240 across a 60k prompt, all measured next to a busy `gemma-4-31b` (benchmarks/inkling-2-mini-2026-11-21.md). |
 
 Not all of them fit at once (their memory shares are in `llm`); start the ones
 you need from the website, the API, the panel or `./llm up`.
@@ -303,8 +303,10 @@ monitor can expose them as Prometheus metrics.
 
 ## When things go wrong
 
-Inkling 2 Mini runs on llama.cpp (`ENGINE_IMAGES` in model_catalog.py),
-which takes what a model needs and ignores the memory share. Started at its
+Inkling 2 Mini runs on llama.cpp, from an image that `./llm up` builds on first
+use (`Containerfile.llama-cpp`: upstream plus a branch that fuses the model's
+many tiny GPU calls, both pinned by commit). llama.cpp takes what a model needs
+and ignores the memory share. Started at its
 262k context on 2026-11-21, it went past 44 GB where llama.cpp's own projection
 said 32, ran the computer out of RAM, and the kernel's OOM killer ended it four
 times in a row. Its context is now 65k, where it was measured (26.6 GB at the
