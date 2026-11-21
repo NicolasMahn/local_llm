@@ -82,6 +82,24 @@ def find_gpu():
     return None, None
 
 
+# llama.cpp's names for the same numbers. It keeps no count of finished
+# requests, so its models' use is not recorded in the usage ledger.
+LLAMA_CPP_METRICS = {
+    "vllm:num_requests_running": "llamacpp:requests_processing",
+    "vllm:num_requests_waiting": "llamacpp:requests_deferred",
+    "vllm:generation_tokens_total": "llamacpp:tokens_predicted_total",
+    "vllm:prompt_tokens_total": "llamacpp:prompt_tokens_total",
+}
+
+
+def server_metric(text, name):
+    """A vLLM metric, or llama.cpp's counterpart from a llama-server."""
+    value = metric(text, name)
+    if value is None and name in LLAMA_CPP_METRICS:
+        value = metric(text, LLAMA_CPP_METRICS[name])
+    return value
+
+
 def metric(text, name):
     """Sum of a Prometheus metric over all its label sets, or None if absent."""
     values = [
@@ -288,17 +306,17 @@ class Monitor:
                 self.tokens.pop(name, None)
                 self.usage.observe(name, None, now)
                 continue
-            running = int(metric(text, "vllm:num_requests_running") or 0)
-            waiting = int(metric(text, "vllm:num_requests_waiting") or 0)
-            tokens = metric(text, "vllm:generation_tokens_total") or 0
+            running = int(server_metric(text, "vllm:num_requests_running") or 0)
+            waiting = int(server_metric(text, "vllm:num_requests_waiting") or 0)
+            tokens = server_metric(text, "vllm:generation_tokens_total") or 0
             last = self.tokens.get(name)
             rate = max(0.0, tokens - last) / elapsed if last is not None and elapsed else 0.0
             self.tokens[name] = tokens
             total_rate += rate
             total_requests += running + waiting
             self.usage.observe(name, {
-                "completed_requests": metric(text, "vllm:request_success_total"),
-                "input_tokens": metric(text, "vllm:prompt_tokens_total"),
+                "completed_requests": server_metric(text, "vllm:request_success_total"),
+                "input_tokens": server_metric(text, "vllm:prompt_tokens_total"),
                 "output_tokens": tokens,
             }, now, active=running + waiting, server_id=metric(text, "process_start_time_seconds"),
                 count=name not in measured)
@@ -306,7 +324,7 @@ class Monitor:
                 "up": True,
                 "running": running,
                 "waiting": waiting,
-                "cache": metric(text, "vllm:kv_cache_usage_perc") or 0,
+                "cache": server_metric(text, "vllm:kv_cache_usage_perc") or 0,
                 "tokens_per_second": round(rate, 1),
             }
         self.usage.save()

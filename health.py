@@ -26,6 +26,11 @@ DISK_LOW_GB = 25
 DISK_CRITICAL_GB = 4
 FIRST_START_LIMIT = 90 * 60  # seconds; a model with no start on record gets this long
 TERMINATED = "terminated"  # a container's reason when a signal from outside ended it
+ERROR_LINE = re.compile(r"\w*Error: ")  # Python's exceptions, from vLLM
+# llama.cpp marks errors with " E "; the first of its last start is the cause,
+# the ones after it only report that loading failed.
+LLAMA_CPP_START = "llama_server: initializing"
+LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
 PODMAN_PERSIST = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "libpod/tmp/persist"
@@ -205,7 +210,7 @@ def outside_scope(pid):
 
 
 def exposed_model_ports():
-    """Addresses outside this computer on which a vLLM process listens.
+    """Addresses outside this computer on which a model server listens.
 
     The model servers have no key; only the gateway may face the network.
     With host networking vLLM picked the network card's IPv6 link-local
@@ -219,7 +224,7 @@ def exposed_model_ports():
     exposed = []
     for line in out.splitlines():
         fields = line.split()
-        if len(fields) < 6 or "vllm" not in fields[5].lower():
+        if len(fields) < 6 or not any(server in fields[5].lower() for server in ("vllm", "llama-server")):
             continue
         host = fields[3].rsplit(":", 1)[0].strip("[]").split("%")[0]
         try:
@@ -313,7 +318,7 @@ class Containers:
 
     def reason(self, container):
         """Why a container ended: TERMINATED when it was stopped from outside,
-        else the last "...Error: ..." line, skipping vLLM's generic wrapper
+        else the line that names the error, skipping vLLM's generic wrapper
         that only points further up."""
         key = container["Id"]
         if key not in self._reasons:
@@ -324,10 +329,17 @@ class Containers:
                 self._reasons[key] = TERMINATED
                 return TERMINATED
             errors = [line for line in log.splitlines()
-                      if re.search(r"\w*Error: ", line) and "Engine core initialization failed" not in line]
-            if errors:
+                      if ERROR_LINE.search(line) and "Engine core initialization failed" not in line]
+            llama_cpp = LLAMA_CPP_ERROR.search(log.rsplit(LLAMA_CPP_START, 1)[-1]) if LLAMA_CPP_START in log else None
+            if llama_cpp:
+                self._reasons[key] = llama_cpp.group(1)[:160]
+            elif errors:
                 line = errors[-1]
-                self._reasons[key] = line[re.search(r"\w*Error: ", line).start():].split(". ")[0][:160]
+                self._reasons[key] = line[ERROR_LINE.search(line).start():].split(". ")[0][:160]
+            elif container["ExitCode"] == 137:
+                # Killed without a word in the log: by the kernel for want of RAM
+                # (inkling-2-mini, 2026-11-21), or by a stop that timed out.
+                self._reasons[key] = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
             else:
                 self._reasons[key] = f"exit code {container['ExitCode']}, see ./llm logs"
         return self._reasons[key]

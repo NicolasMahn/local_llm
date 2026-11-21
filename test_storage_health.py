@@ -183,3 +183,39 @@ def test_idle_gpu_warning_names_the_model_that_runs_with_several_gpu_queues(tmp_
     message = next(p["message"] for p in problems if "no model requests" in p["message"])
     assert "gemma-4-26b was started without GPU_MAX_HW_QUEUES=1" in message
     assert "granite" not in message and "gateway" not in message
+
+
+# llama-server's own output when its checkpoint is missing (image of 2026-11-21).
+LLAMA_CPP_MISSING_MODEL = """\
+0.00.051.186 I srv  llama_server: initializing ...
+0.00.005.840 E gguf_init_from_file: failed to open GGUF file '/model/x.gguf' (No such file or directory)
+0.00.007.233 E llama_model_load: error loading model: llama_model_loader: failed to load model from /model/x.gguf
+0.00.007.294 E srv    load_model: failed to load model, '/model/x.gguf'
+0.00.008.300 E srv  server_run_i: exiting due to model loading error
+"""
+
+
+def container_reason(monkeypatch, log, exit_code=1):
+    monkeypatch.setattr(health.subprocess, "run", lambda command, **_: SimpleNamespace(stdout=log, stderr=""))
+    return health.Containers().reason({"Id": "abc", "ExitCode": exit_code})
+
+
+def test_a_llama_cpp_model_that_cannot_start_shows_its_cause_not_the_last_complaint(monkeypatch):
+    earlier_run = "0.00.001.000 I srv  llama_server: initializing ...\n0.00.002.000 E srv  load_model: old failure\n"
+    reason = container_reason(monkeypatch, earlier_run + LLAMA_CPP_MISSING_MODEL)
+    assert reason == "gguf_init_from_file: failed to open GGUF file '/model/x.gguf' (No such file or directory)"
+
+
+def test_a_silent_kill_is_named_as_likely_out_of_memory(monkeypatch):
+    # The OOM killer ended llama-server mid-load, leaving only its startup lines.
+    log = "0.00.035.364 I srv    load_model: loading model '/model/Inkling-2-Mini-IQ4_NL.gguf'\n"
+    assert "lack of memory" in container_reason(monkeypatch, log, exit_code=137)
+    assert container_reason(monkeypatch, log, exit_code=1) == "exit code 1, see ./llm logs"
+
+
+def test_llama_server_on_a_public_address_is_reported_like_vllm(monkeypatch):
+    listening = ('LISTEN 0 512 127.0.0.1:8026 0.0.0.0:* users:(("llama-server",pid=1,fd=3))\n'
+                 'LISTEN 0 512 0.0.0.0:8027 0.0.0.0:* users:(("llama-server",pid=2,fd=3))\n'
+                 'LISTEN 0 512 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=3,fd=3))\n')
+    monkeypatch.setattr(health.subprocess, "run", lambda command, **_: SimpleNamespace(stdout=listening))
+    assert health.exposed_model_ports() == ["0.0.0.0:8027"]

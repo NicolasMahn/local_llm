@@ -208,7 +208,35 @@ def test_capabilities_and_launch_parsers_match_the_exact_model_generation():
     assert "--reasoning-parser" not in catalog.flags(mistral)
     for model in catalog.MODELS.values():
         assert model["capabilities"]["input"][0] == "text"
-        assert catalog.flags(model)[catalog.flags(model).index("--max-num-batched-tokens") + 1] == "512"
+        flags = catalog.flags(model)
+        # One GPU call per 512 tokens keeps prefill under the GPU watchdog (README).
+        steps = ("--batch-size", "--ubatch-size") if catalog.engine(model) == "llama.cpp" else ("--max-num-batched-tokens",)
+        assert all(flags[flags.index(step) + 1] == "512" for step in steps)
+
+
+def test_a_gguf_checkpoint_is_complete_only_with_its_chosen_files(tmp_path):
+    files = catalog.checkpoint_files(catalog.MODELS["inkling-2-mini"])
+    assert files == ["Inkling-2-Mini-IQ4_NL.gguf", "mmproj-Inkling-2-Mini-Q8_0.gguf"]
+    (tmp_path / files[0]).write_bytes(b"GGUF")
+    assert not catalog.complete(tmp_path, files)
+    (tmp_path / files[1]).touch()
+    assert not catalog.complete(tmp_path, files)
+    (tmp_path / files[1]).write_bytes(b"GGUF")
+    assert catalog.complete(tmp_path, files)
+    assert catalog.checkpoint_files(catalog.MODELS["granite-4.2-30b"]) is None
+
+
+def test_llama_cpp_models_get_their_files_and_their_own_image(configured_dir, tmp_path):
+    configured_dir.write_text(str(tmp_path / "models"))
+    args = catalog.serve_args("inkling-2-mini")
+    assert args == ["--model", "/model/Inkling-2-Mini-IQ4_NL.gguf",
+                    "--mmproj", "/model/mmproj-Inkling-2-Mini-Q8_0.gguf"]
+    rows = subprocess.run(["python3", str(Path(catalog.__file__)), "rows"], check=True,
+                          capture_output=True, text=True).stdout.splitlines()
+    row = next(line.split("|") for line in rows if line.startswith("inkling-2-mini|"))
+    assert row[5] == "llama.cpp" and "@sha256:" in row[6]
+    granite = next(line.split("|") for line in rows if line.startswith("granite-4.2-30b|"))
+    assert granite[5:] == ["vllm", ""]
 
 
 def test_a_copy_is_listed_ten_ports_up_only_while_asked_for():
@@ -338,6 +366,41 @@ def test_ignored_duplicate_weights_are_neither_counted_nor_fetched(tmp_path, mon
     assert fetched[0]["ignore_patterns"] == ["consolidated.safetensors", "tekken.json"]
 
 
+def test_a_gguf_repository_fetches_only_the_chosen_quantization(tmp_path, monkeypatch):
+    import huggingface_hub
+    import download_models as downloads
+
+    name = "inkling-2-mini"
+    pinned = catalog.MODELS[name]
+    model = {"name": name, "repo": pinned["repo"]}
+    siblings = [SimpleNamespace(rfilename=pinned["gguf"], size=4),
+                SimpleNamespace(rfilename=pinned["mmproj"], size=2),
+                SimpleNamespace(rfilename="Inkling-2-Mini-BF16.gguf", size=52)]
+    counted, fetched = [], []
+
+    class Api:
+        def model_info(self, repo, **kwargs):
+            return SimpleNamespace(sha=pinned["revision"], siblings=siblings)
+
+    def transfer(repo, **kwargs):
+        fetched.append(kwargs)
+        (tmp_path / pinned["gguf"]).write_bytes(b"1234")
+        (tmp_path / pinned["mmproj"]).write_bytes(b"12")
+
+    monkeypatch.setattr(downloads, "model_dir", lambda: tmp_path)
+    monkeypatch.setattr(downloads, "snapshot", lambda repo: tmp_path)
+    monkeypatch.setattr(downloads, "storage_error", lambda path: None)
+    monkeypatch.setattr(downloads, "require_space", lambda target, missing: counted.append(missing))
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", transfer)
+    downloads.download(model)
+    assert counted == [6]
+    assert fetched[0]["allow_patterns"] == [pinned["gguf"], pinned["mmproj"]]
+    siblings.pop(1)
+    with pytest.raises(ValueError, match="lacks mmproj"):
+        downloads.download(model)
+
+
 def test_missing_selected_cache_refuses_download_before_hub_access(monkeypatch):
     import huggingface_hub
     import download_models as downloads
@@ -405,3 +468,13 @@ def test_kv_cache_estimate_counts_full_attention_and_skips_hybrids(tmp_path, mon
     (tmp_path / "config.json").write_text(json.dumps(config | {"hybrid_override_pattern": "M-M*"}))
     assert catalog.kv_cache_bytes("nanbeige-4.3-33b") == 0
     assert catalog.kv_cache_bytes("qwen3.8-27b") == 0
+
+
+def test_a_llama_cpp_model_refuses_settings_whose_memory_was_not_measured():
+    measured = catalog.flags(catalog.MODELS["inkling-2-mini"])
+    assert catalog.flags_error("inkling-2-mini", measured) is None
+    # 262k took over 44 GB where llama.cpp projected 32, and the kernel killed it.
+    assert "--ctx-size 65536, not 262144" in catalog.flags_error("inkling-2-mini", [*measured, "--ctx-size", "262144"])
+    assert "--parallel" in catalog.flags_error("inkling-2-mini-copy", [*measured, "--parallel", "8"])
+    assert catalog.memory_bytes("inkling-2-mini") > 26 * catalog.GIB
+    assert catalog.memory_bytes("granite-4.2-30b") == 0

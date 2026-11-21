@@ -134,7 +134,48 @@ MODELS = {
         "capabilities": {"input": ["text"], "reasoning": True, "thinking_toggle": True,
                          "tools": True, "structured_output": True},
     },
+    # vLLM runs Inkling 2 only from its NVFP4/MXFP8 weights on Hopper or newer
+    # (2026-11-21), so this one is served by llama.cpp, which added the looped
+    # architecture on 2026-11-20 (ggml-org/llama.cpp#32694).
+    "inkling-2-mini": {
+        "port": 8026, "share": 0.25,
+        "engine": "llama.cpp",
+        "source": "thinkingmachines/Inkling-2-Mini",
+        "repo": "ggml-org/Inkling-2-Mini-GGUF",
+        "revision": "e8a2cecf0e78914f07cc27b9be711a9b2c7561d9",
+        "gguf": "Inkling-2-Mini-IQ4_NL.gguf",
+        "mmproj": "mmproj-Inkling-2-Mini-Q8_0.gguf",
+        "quantization": "GGUF IQ4_NL experts in layers 0-19 (imatrix), Q8_0 elsewhere",
+        # llama.cpp takes what this needs, whatever the share says, and its own
+        # projection undercounts: at 262k it promised 32 GB, took over 44 and
+        # the kernel killed it for want of RAM (2026-11-21). So the context
+        # stays where its memory was measured: 26.3 GB loaded, 26.6 GB at peak
+        # with a 60k-token prompt. Each step's working memory is 6.5 GB at any
+        # context; upstream's ggml-org/llama.cpp#32752 should make longer ones cheaper.
+        "context": 65536, "max_seqs": 4, "measured_gib": 26.6,
+        # Its template sets thinking with chat_template_kwargs.reasoning_effort,
+        # 0.0 to 0.99 (default 0.9); even 0.0 thinks a few sentences.
+        "capabilities": {"input": ["text", "image"], "reasoning": True, "thinking_toggle": False,
+                         "tools": True, "structured_output": True},
+    },
 }
+
+# llama.cpp is not in the vLLM image; this one is built for gfx1151 and pinned
+# by digest, since its tags move with every nightly build.
+ENGINE_IMAGES = {
+    "llama.cpp": "docker.io/kyuz0/amd-strix-halo-toolboxes@sha256:df68e4b6f54689ac4e9e2884197408507d842a7194617a57eefedc8a995d0b8f",
+}
+
+
+def engine(model):
+    return model.get("engine", "vllm")
+
+
+def checkpoint_files(model):
+    """The files a GGUF model needs, or None for a full Hugging Face snapshot."""
+    if engine(model) != "llama.cpp":
+        return None
+    return [model["gguf"]] + ([model["mmproj"]] if model.get("mmproj") else [])
 
 
 def for_repo(repo):
@@ -220,9 +261,17 @@ def serving_layout(repo):
     return checkpoint.parent.parent, "/checkpoint", f"/checkpoint/snapshots/{checkpoint.name}"
 
 
-def complete(path):
-    """Do not admit a checkpoint while an indexed shard is still downloading."""
+def complete(path, files=None):
+    """Do not admit a checkpoint while an indexed shard is still downloading.
+
+    A GGUF checkpoint has no config.json; `files` names what it needs instead.
+    """
     path = Path(path)
+    if files is not None:
+        try:
+            return all((path / name).is_file() and (path / name).stat().st_size > 0 for name in files)
+        except OSError:
+            return False
     try:
         if not isinstance(json.loads((path / "config.json").read_text()), dict):
             return False
@@ -243,6 +292,8 @@ def complete(path):
 
 
 def flags(model):
+    if engine(model) == "llama.cpp":
+        return llama_flags(model)
     result = ["--max-model-len", str(model["context"]), "--max-num-batched-tokens", str(model.get("prefill", 512)),
               "--max-num-seqs", str(model["max_seqs"]), "--dtype", "bfloat16",
               "--attention-backend", "TRITON_ATTN", "--enable-prompt-tokens-details"]
@@ -251,6 +302,26 @@ def flags(model):
     if model["tool_parser"]:
         result += ["--tool-call-parser", model["tool_parser"], "--enable-auto-tool-choice",
                    "--exclude-tools-when-tool-choice-none"]
+    return result
+
+
+def llama_flags(model):
+    # Batches of 512 keep each GPU call short, as for vLLM (README). One KV
+    # pool shared by all slots lets a single request use the whole context.
+    # --jinja applies the model's own chat template, which handles tools and
+    # thinking; --metrics feeds the monitor.
+    return ["--ctx-size", str(model["context"]), "--parallel", str(model["max_seqs"]), "--kv-unified",
+            "--batch-size", "512", "--ubatch-size", "512", "--n-gpu-layers", "999",
+            "--flash-attn", "on", "--jinja", "--metrics", "--no-webui"]
+
+
+def serve_args(name):
+    """The model files for llama-server, as paths inside the container."""
+    model = MODELS[name]
+    target = serving_layout(model["repo"])[2]
+    result = ["--model", f"{target}/{model['gguf']}"]
+    if model.get("mmproj"):
+        result += ["--mmproj", f"{target}/{model['mmproj']}"]
     return result
 
 
@@ -342,6 +413,11 @@ def kv_cache_bytes(name):
     return per_token * model["context"]
 
 
+def memory_bytes(name):
+    """What a llama.cpp model was measured to take at its settings, or 0."""
+    return int(MODELS.get(name, {}).get("measured_gib", 0) * GIB)
+
+
 def ignored_files_error(name):
     """An ignored file left in the folder still loads: a tekken.json from an
     earlier copy brings back the image crash ministral-3-3b documents."""
@@ -385,6 +461,15 @@ def flags_error(name, flags):
         values = [value for name_, value in zip(flags, flags[1:]) if name_ == flag]
         return values[-1] if values else None
 
+    model = MODELS.get(name.removesuffix("-copy"), {})
+    if engine(model) == "llama.cpp":
+        measured = dict(zip(llama_flags(model), llama_flags(model)[1:]))
+        for flag in ("--ctx-size", "--parallel", "--batch-size", "--ubatch-size"):
+            if last(flag) != measured[flag]:
+                return (f"{name} was measured with {flag} {measured[flag]}, not {last(flag)}; "
+                        "llama.cpp ignores the memory share and undercounts what other "
+                        "settings take, so measure them before changing the catalog")
+        return None
     dtype = last("--kv-cache-dtype")
     if dtype not in (None, "auto") and name.startswith("gemma-"):
         return (f"{name} needs an unquantized KV cache: its long-context attention "
@@ -429,7 +514,8 @@ def main():
     command = sys.argv[1]
     if command == "rows":
         for name, model in MODELS.items():
-            print(f"{name}|{model['port']}|{model['share']}|{model['repo']}|{' '.join(flags(model))}")
+            print(f"{name}|{model['port']}|{model['share']}|{model['repo']}|{' '.join(flags(model))}"
+                  f"|{engine(model)}|{ENGINE_IMAGES.get(engine(model), '')}")
     elif command == "snapshot":
         if for_repo(sys.argv[2]) is None:
             sys.exit(1)
@@ -445,6 +531,8 @@ def main():
         root = model_dir()
         if root is not None:
             print(root)
+    elif command == "memory-bytes":
+        print(memory_bytes(sys.argv[2]))
     elif command == "kv-bytes":
         found = for_repo(sys.argv[2])
         print(kv_cache_bytes(found[0]) if found else 0)
@@ -456,6 +544,8 @@ def main():
     elif command == "mount":
         source, target, _ = serving_layout(sys.argv[2])
         print(f"{source}:{target}:ro")
+    elif command == "serve-args":
+        print(" ".join(serve_args(sys.argv[2])))
     elif command == "serve-path":
         print(serving_layout(sys.argv[2])[2])
     elif command == "contains":
@@ -465,7 +555,9 @@ def main():
 
         if storage_error(sys.argv[2]):
             sys.exit(1)
-        sys.exit(not complete(sys.argv[2]))
+        found = next((model for model in MODELS.values()
+                      if snapshot(model["repo"]) == Path(sys.argv[2])), None)
+        sys.exit(not complete(sys.argv[2], checkpoint_files(found) if found else None))
     elif command == "check-storage":
         from health import storage_error
 
@@ -477,7 +569,7 @@ def main():
             raise SystemExit(reason)
         if reason := ignored_files_error(sys.argv[2]):
             raise SystemExit(reason)
-        if sys.argv[2] in MODELS:
+        if sys.argv[2] in MODELS and engine(MODELS[sys.argv[2]]) == "vllm":
             try:
                 available = image_parsers(sys.argv[3])
             except (OSError, ValueError, subprocess.SubprocessError) as exc:

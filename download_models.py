@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from health import storage_error
-from model_catalog import GIB, MODELS, cache_error, cache_root, model_dir, snapshot
+from model_catalog import GIB, MODELS, cache_error, cache_root, checkpoint_files, model_dir, snapshot
 
 HERE = Path(__file__).resolve().parent
 RESERVE_BYTES = 25 * GIB
@@ -84,8 +84,13 @@ def download(model, *, check=False):
         raise ValueError(f"{name}: the Hub resolved a different revision than requested")
     target = snapshot(repo) if pinned else cache / ("models--" + repo.replace("/", "--")) / "snapshots" / info.sha
     ignore = pinned.get("ignore", []) if pinned else []
+    # A GGUF repository holds several quantizations; only the chosen one is fetched.
+    allow = checkpoint_files(pinned) if pinned else None
     files = [(item.rfilename, item.size) for item in info.siblings
-             if not any(fnmatch(item.rfilename, pattern) for pattern in ignore)]
+             if not any(fnmatch(item.rfilename, pattern) for pattern in ignore)
+             and (allow is None or item.rfilename in allow)]
+    if allow is not None and {filename for filename, _ in files} != set(allow):
+        raise ValueError(f"{name}: the pinned revision lacks {', '.join(sorted(set(allow) - {f for f, _ in files}))}")
     if any(size is None or size < 0 or Path(filename).is_absolute()
            or ".." in Path(filename).parts for filename, size in files):
         raise ValueError(f"{name}: missing file sizes or unsafe paths in Hub metadata")
@@ -99,7 +104,8 @@ def download(model, *, check=False):
     if check:
         return
     options = {"local_dir": target} if root is not None else {"cache_dir": cache}
-    snapshot_download(repo, revision=info.sha, ignore_patterns=ignore or None, **options, **authentication)
+    snapshot_download(repo, revision=info.sha, ignore_patterns=ignore or None, allow_patterns=allow,
+                      **options, **authentication)
     if remaining_bytes(files, target):
         raise ValueError(f"{name}: download ended with missing or incomplete files")
     print(f"DONE {name} {datetime.now(timezone.utc).isoformat(timespec='seconds')}", flush=True)

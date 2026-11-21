@@ -56,6 +56,7 @@ past chats, is its own project, local_llm_chat.
 | `nemotron-3-nano-4b` | NVIDIA's tiny hybrid model, optional thinking and tools; passed every check. ~31 tokens/s (BF16), reads ~3,500 tokens/s. |
 | `granite-4.2-3b` | IBM's tiny dense model, optional thinking and tools. ~32 tokens/s (BF16). |
 | `minicpm5-2b` | the fastest: ~100 tokens/s, ~375 in total at 16 requests; optional thinking and tools. Thinks long on arithmetic. |
+| `inkling-2-mini` | Thinking Machines' looped MoE (26B, 3.4B active); sees pictures, tools, always thinks a little. Served by llama.cpp, since vLLM runs it only on NVIDIA Hopper or newer. 65k context. 7–12 tokens/s and reads ~135 tokens/s, both measured next to a busy `gemma-4-31b`; slow on long prompts (60k tokens took 15 min). |
 
 Not all of them fit at once (their memory shares are in `llm`); start the ones
 you need from the website, the API, the panel or `./llm up`.
@@ -301,6 +302,24 @@ monitor can expose them as Prometheus metrics.
   numbers are in `SURCHARGES_CT` in `monitor.py`; check them each January.
 
 ## When things go wrong
+
+Inkling 2 Mini runs on llama.cpp (`ENGINE_IMAGES` in model_catalog.py),
+which takes what a model needs and ignores the memory share. Started at its
+262k context on 2026-11-21, it went past 44 GB where llama.cpp's own projection
+said 32, ran the computer out of RAM, and the kernel's OOM killer ended it four
+times in a row. Its context is now 65k, where it was measured (26.6 GB at the
+peak of a 60k-token prompt). `./llm up` counts that measurement against the
+share, and refuses a llama.cpp model started with a context, slot count or
+batch size other than the measured ones. A container killed without a word in
+its log now shows "killed (SIGKILL), most likely for lack of memory" in status,
+the panel and the chat. For llama.cpp, status shows the first error of the last
+start, which names the cause, rather than the last line that only says loading
+failed. Before you raise the context, measure it: start the model by hand with
+the new `--ctx-size`, watch `mem_info_gtt_used`, then update `context` and
+`measured_gib` together. Upstream ggml-org/llama.cpp#32752 should cut its 6.5 GB
+working memory. Thinking cannot be turned off: `chat_template_kwargs.reasoning_effort`
+(0.0 to 0.99) only shortens it. llama.cpp keeps no count of finished requests,
+so this model's use is not in `./llm usage`.
 
 Granite's symmetric GPTQ checkpoint exposed a Strix runtime bug on 2026-11-12:
 AutoGPTQ registered packed `qzeros` even though the RDNA kernel configuration
