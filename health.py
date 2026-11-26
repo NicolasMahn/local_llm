@@ -359,10 +359,6 @@ class Containers:
         what ends the log, after its last ordinary line; failed requests are
         logged as errors too and never count. A silent kill outranks it."""
         loading, loaded, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
-        if first := LLAMA_CPP_ERROR.search(loading):
-            return first.group(1)[:160]
-        if exit_code == 137:
-            return KILLED
         tail = serving if loaded else loading
         ordinary = list(LLAMA_CPP_INFO.finditer(tail))
         tail = tail[ordinary[-1].end():] if ordinary else tail
@@ -372,9 +368,14 @@ class Containers:
             # The abort only names the kind of error; its logged line says which.
             detail = next((line[line.index(message):] for line in errors if message in line), message)
             return f"{detail} ({place})"[:160]
+        if first := LLAMA_CPP_ERROR.search(loading):
+            return first.group(1)[:160]
+        if exit_code == 137:
+            return KILLED
         if errors:
             return errors[0][:160]
         return f"exit code {exit_code}, see ./llm logs"
+
 
 class Health:
     def __init__(self, state_dir):

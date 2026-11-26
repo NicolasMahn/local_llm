@@ -235,7 +235,8 @@ def test_a_gpu_fault_while_serving_shows_its_error(monkeypatch):
     assert container_reason(monkeypatch, served + abort, 134) == "ROCm error (ggml-cuda.cu:94)"
     assert container_reason(monkeypatch, served + logged, 134) == "ROCm error: out of memory"
     # A segfault right after a failed request leaves nothing of its own.
-    assert container_reason(monkeypatch, served, 139) == "exit code 139, see ./llm logs"
+    failed = served + "0.20.100.000 E srv  got exception: ValueError: bad tool schema\n"
+    assert container_reason(monkeypatch, failed, 139) == "exit code 139, see ./llm logs"
 
 
 def test_an_assert_while_loading_shows_its_place(monkeypatch):
@@ -243,6 +244,10 @@ def test_an_assert_while_loading_shows_its_place(monkeypatch):
            "0.00.050.000 I srv    load_model: loading model '/model/x.gguf'\n"
            "/src/ggml/src/ggml-cuda/inkling2.cu:412: GGML_ASSERT(n > 0) failed\n")
     assert container_reason(monkeypatch, log, 134) == "GGML_ASSERT(n > 0) failed (inkling2.cu:412)"
+    rocm = ("0.00.060.000 E ROCm error: unspecified launch failure\n"
+            "/src/ggml/src/ggml-cuda/ggml-cuda.cu:94: ROCm error\n")
+    assert (container_reason(monkeypatch, log.rsplit("/src", 1)[0] + rocm, 134)
+            == "ROCm error: unspecified launch failure (ggml-cuda.cu:94)")
 
 
 def test_a_crash_that_logs_no_error_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
