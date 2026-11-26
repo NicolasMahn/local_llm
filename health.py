@@ -26,6 +26,20 @@ DISK_LOW_GB = 25
 DISK_CRITICAL_GB = 4
 FIRST_START_LIMIT = 90 * 60  # seconds; a model with no start on record gets this long
 TERMINATED = "terminated"  # a container's reason when a signal from outside ended it
+ERROR_LINE = re.compile(r"\w*Error: ")  # Python's exceptions, from vLLM
+# llama.cpp marks errors with " E "; the first of its last start is the cause,
+# the ones after it only report that loading failed.
+LLAMA_CPP_START = "llama_server: initializing"
+LLAMA_CPP_LOADED = "server_run_i: model loaded"
+KILLED = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
+LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
+LLAMA_CPP_INFO = re.compile(r"^\S+ I .*$", re.M)
+LLAMA_CPP_ERROR_LINE = re.compile(r"^\S+ E (.*)$", re.M)
+REQUEST_ERROR = re.compile(r"\b(?:send_error|got exception):")
+# ggml's abort, written straight to stderr; it can be the only line a GPU
+# fault leaves, because llama.cpp's own log is written by a thread that dies
+# with the process.
+GGML_ABORT = re.compile(r"^\S*?([\w.-]+:\d+): (.*)$", re.M)
 # Where podman keeps each running container's runtime files, including the
 # one its monitor process writes the exit code to.
 PODMAN_PERSIST = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "libpod/tmp/persist"
@@ -205,7 +219,7 @@ def outside_scope(pid):
 
 
 def exposed_model_ports():
-    """Addresses outside this computer on which a vLLM process listens.
+    """Addresses outside this computer on which a model server listens.
 
     The model servers have no key; only the gateway may face the network.
     With host networking vLLM picked the network card's IPv6 link-local
@@ -219,7 +233,7 @@ def exposed_model_ports():
     exposed = []
     for line in out.splitlines():
         fields = line.split()
-        if len(fields) < 6 or "vllm" not in fields[5].lower():
+        if len(fields) < 6 or not any(server in fields[5].lower() for server in ("vllm", "llama-server")):
             continue
         host = fields[3].rsplit(":", 1)[0].strip("[]").split("%")[0]
         try:
@@ -313,7 +327,7 @@ class Containers:
 
     def reason(self, container):
         """Why a container ended: TERMINATED when it was stopped from outside,
-        else the last "...Error: ..." line, skipping vLLM's generic wrapper
+        else the line that names the error, skipping vLLM's generic wrapper
         that only points further up."""
         key = container["Id"]
         if key not in self._reasons:
@@ -323,14 +337,44 @@ class Containers:
             if "KeyboardInterrupt: terminated" in log:
                 self._reasons[key] = TERMINATED
                 return TERMINATED
+            if LLAMA_CPP_START in log:
+                self._reasons[key] = self.llama_cpp_reason(log, container["ExitCode"])
+                return self._reasons[key]
             errors = [line for line in log.splitlines()
-                      if re.search(r"\w*Error: ", line) and "Engine core initialization failed" not in line]
+                      if ERROR_LINE.search(line) and "Engine core initialization failed" not in line]
             if errors:
                 line = errors[-1]
-                self._reasons[key] = line[re.search(r"\w*Error: ", line).start():].split(". ")[0][:160]
+                self._reasons[key] = line[ERROR_LINE.search(line).start():].split(". ")[0][:160]
+            elif container["ExitCode"] == 137:
+                # Killed without a word in the log: by the kernel for want of RAM,
+                # or by a stop that timed out.
+                self._reasons[key] = KILLED
             else:
                 self._reasons[key] = f"exit code {container['ExitCode']}, see ./llm logs"
         return self._reasons[key]
+
+    @staticmethod
+    def llama_cpp_reason(log, exit_code):
+        """While loading, the first error is the cause. Otherwise a crash is
+        what ends the log, after its last ordinary line; failed requests are
+        logged as errors too and never count. A silent kill outranks it."""
+        loading, loaded, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
+        tail = serving if loaded else loading
+        ordinary = list(LLAMA_CPP_INFO.finditer(tail))
+        tail = tail[ordinary[-1].end():] if ordinary else tail
+        errors = [line for line in LLAMA_CPP_ERROR_LINE.findall(tail) if not REQUEST_ERROR.search(line)]
+        if abort := GGML_ABORT.findall(tail):
+            place, message = abort[-1]
+            # The abort only names the kind of error; its logged line says which.
+            detail = next((line[line.index(message):] for line in errors if message in line), message)
+            return f"{detail} ({place})"[:160]
+        if first := LLAMA_CPP_ERROR.search(loading):
+            return first.group(1)[:160]
+        if exit_code == 137:
+            return KILLED
+        if errors:
+            return errors[0][:160]
+        return f"exit code {exit_code}, see ./llm logs"
 
 
 class Health:

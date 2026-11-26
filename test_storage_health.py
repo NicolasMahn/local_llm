@@ -183,3 +183,86 @@ def test_idle_gpu_warning_names_the_model_that_runs_with_several_gpu_queues(tmp_
     message = next(p["message"] for p in problems if "no model requests" in p["message"])
     assert "gemma-4-26b was started without GPU_MAX_HW_QUEUES=1" in message
     assert "granite" not in message and "gateway" not in message
+
+
+# llama-server's own output when its checkpoint is missing (image of 2026-11-21).
+LLAMA_CPP_MISSING_MODEL = """\
+0.00.051.186 I srv  llama_server: initializing ...
+0.00.005.840 E gguf_init_from_file: failed to open GGUF file '/model/x.gguf' (No such file or directory)
+0.00.007.233 E llama_model_load: error loading model: llama_model_loader: failed to load model from /model/x.gguf
+0.00.007.294 E srv    load_model: failed to load model, '/model/x.gguf'
+0.00.008.300 E srv  server_run_i: exiting due to model loading error
+"""
+
+
+def container_reason(monkeypatch, log, exit_code=1):
+    monkeypatch.setattr(health.subprocess, "run", lambda command, **_: SimpleNamespace(stdout=log, stderr=""))
+    return health.Containers().reason({"Id": "abc", "ExitCode": exit_code})
+
+
+def test_a_llama_cpp_model_that_cannot_start_shows_its_cause_not_the_last_complaint(monkeypatch):
+    earlier_run = "0.00.001.000 I srv  llama_server: initializing ...\n0.00.002.000 E srv  load_model: old failure\n"
+    reason = container_reason(monkeypatch, earlier_run + LLAMA_CPP_MISSING_MODEL)
+    assert reason == "gguf_init_from_file: failed to open GGUF file '/model/x.gguf' (No such file or directory)"
+
+
+def test_a_silent_kill_is_named_as_likely_out_of_memory(monkeypatch):
+    # The OOM killer ended llama-server mid-load, leaving only its startup lines.
+    log = "0.00.035.364 I srv    load_model: loading model '/model/Inkling-2-Mini-IQ4_NL.gguf'\n"
+    assert "lack of memory" in container_reason(monkeypatch, log, exit_code=137)
+    assert container_reason(monkeypatch, log, exit_code=1) == "exit code 1, see ./llm logs"
+
+
+def test_a_kill_while_serving_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.10.700.413 I srv  server_run_i: model loaded\n"
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
+           "0.20.100.000 E srv  got exception: ValueError: bad tool schema\n")
+    assert "lack of memory" in container_reason(monkeypatch, log, exit_code=137)
+
+
+def test_a_gpu_fault_while_serving_shows_its_error(monkeypatch):
+    # ggml_cuda_error logs three lines, then aborts naming only the kind of error.
+    served = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+              "0.10.700.413 I srv  server_run_i: model loaded\n"
+              "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n")
+    logged = ("0.30.000.000 E ROCm error: out of memory\n"
+              "0.30.000.001 E   current device: 0, in function alloc at /src/ggml/src/ggml-cuda/ggml-cuda.cu:420\n"
+              "0.30.000.002 E   hipMalloc(&ptr, size)\n")
+    abort = "/src/ggml/src/ggml-cuda/ggml-cuda.cu:94: ROCm error\n"
+    assert container_reason(monkeypatch, served + logged + abort, 134) == "ROCm error: out of memory (ggml-cuda.cu:94)"
+    # The log thread can die before it writes its lines.
+    assert container_reason(monkeypatch, served + abort, 134) == "ROCm error (ggml-cuda.cu:94)"
+    assert container_reason(monkeypatch, served + logged, 134) == "ROCm error: out of memory"
+    # A segfault right after a failed request leaves nothing of its own.
+    failed = served + "0.20.100.000 E srv  got exception: ValueError: bad tool schema\n"
+    assert container_reason(monkeypatch, failed, 139) == "exit code 139, see ./llm logs"
+
+
+def test_an_assert_while_loading_shows_its_place(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.00.050.000 I srv    load_model: loading model '/model/x.gguf'\n"
+           "/src/ggml/src/ggml-cuda/inkling2.cu:412: GGML_ASSERT(n > 0) failed\n")
+    assert container_reason(monkeypatch, log, 134) == "GGML_ASSERT(n > 0) failed (inkling2.cu:412)"
+    rocm = ("0.00.060.000 E ROCm error: unspecified launch failure\n"
+            "/src/ggml/src/ggml-cuda/ggml-cuda.cu:94: ROCm error\n")
+    assert (container_reason(monkeypatch, log.rsplit("/src", 1)[0] + rocm, 134)
+            == "ROCm error: unspecified launch failure (ggml-cuda.cu:94)")
+
+
+def test_a_crash_that_logs_no_error_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
+    log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+           "0.10.700.413 I srv  server_run_i: model loaded\n"
+           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
+           "0.20.000.100 I srv  update_slots: all slots are idle\n")
+    assert container_reason(monkeypatch, log, exit_code=139) == "exit code 139, see ./llm logs"
+    asserted = log + "/src/ggml/src/ggml-cuda/inkling2.cu:412: GGML_ASSERT(n > 0) failed\n"
+    assert container_reason(monkeypatch, asserted, exit_code=134) == "GGML_ASSERT(n > 0) failed (inkling2.cu:412)"
+
+
+def test_llama_server_on_a_public_address_is_reported_like_vllm(monkeypatch):
+    listening = ('LISTEN 0 512 127.0.0.1:8026 0.0.0.0:* users:(("llama-server",pid=1,fd=3))\n'
+                 'LISTEN 0 512 0.0.0.0:8027 0.0.0.0:* users:(("llama-server",pid=2,fd=3))\n'
+                 'LISTEN 0 512 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=3,fd=3))\n')
+    monkeypatch.setattr(health.subprocess, "run", lambda command, **_: SimpleNamespace(stdout=listening))
+    assert health.exposed_model_ports() == ["0.0.0.0:8027"]

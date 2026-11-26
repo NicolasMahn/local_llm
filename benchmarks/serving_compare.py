@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from benchmark import contamination_reasons, media_part, parse_backend_metrics, request
+from benchmark import contamination_reasons, media_part, parse_backend_metrics, request, require_completion_count
 
 
 class Guard:
@@ -25,6 +25,7 @@ class Guard:
         for url in self.urls:
             with urllib.request.urlopen(url.removesuffix("/v1") + "/metrics", timeout=5) as response:
                 readings.append(parse_backend_metrics(response.read().decode()))
+        require_completion_count(self.urls[0], readings[0])
         return readings
 
     def trial(self, call, count):

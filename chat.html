@@ -635,7 +635,8 @@
             answer += delta.content;
             // Qwen leaves blank lines between its thinking and the answer.
             reply.innerHTML = markdown(answer.trimStart());
-          } else if (!answer && delta.reasoning && !thinking) {
+          } else if (!answer && (delta.reasoning || delta.reasoning_content) && !thinking) {
+            // vLLM names the thinking `reasoning`, llama.cpp `reasoning_content`.
             thinking = true;
             showStatus(reply, "Thinking");
           }

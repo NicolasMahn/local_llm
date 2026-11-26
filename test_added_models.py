@@ -490,7 +490,7 @@ class AddedModelsTest(unittest.TestCase):
 
     def test_every_served_model_runs_the_suite_with_only_the_cases_it_can_answer(self):
         self.assertEqual({name for name in SUITE if not name.endswith("-copy")}, set(LEGACY) | set(MODELS))
-        self.assertEqual(len(set(LEGACY) | set(MODELS)), 15)
+        self.assertEqual(len(set(LEGACY) | set(MODELS)), 16)
         self.assertIs(SUITE["qwen3-omni-30b-copy"], SUITE["qwen3-omni-30b"])
         omni = selected_cases(["extended"], SUITE["qwen3-omni-30b"]["capabilities"])
         # Omni has no thinking to separate, so a reasoning check could only fail.

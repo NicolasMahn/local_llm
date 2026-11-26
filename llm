@@ -39,6 +39,7 @@ WANTED_FILE=$STATE_DIR/wanted
 CONTROL_DIR=${XDG_RUNTIME_DIR:-/tmp}/local-llm # control.py's socket, for the gateway
 
 # name | port | GPU memory share | Hugging Face repo | extra vLLM flags
+# (model_catalog.py's rows add | engine | image, for models vLLM cannot run)
 # The shares add up to less than 1.0 so the desktop keeps some memory.
 # Qwen3.8 mixes attention with a recurrent layer whose cache is one block per
 # concurrent request, so max-num-seqs has to stay within the memory share.
@@ -138,10 +139,11 @@ run_container() {
   local name=$1; shift
   local -a cpu_environment=() checkpoint_mount=() profile_mount=() moe_mount=()
   local -a cache_mount=()
-  local model repo cache
+  local model repo cache image=$IMAGE
   for model in "${MODELS[@]}"; do
     [[ $(field "$model" 1) == "$name" ]] || continue
     repo=$(field "$model" 4)
+    [[ -z $(field "$model" 7) ]] || image=$(field "$model" 7)
     break
   done
   if python3 "$HERE/model_catalog.py" contains "$name"; then
@@ -211,7 +213,7 @@ run_container() {
     -e LOCAL_LLM_FAST_KERNELS="$(fast_kernel_mode "$name")" \
     "${cpu_environment[@]}" \
     -e TRITON_CACHE_AUTOTUNING=1 -e TRITON_PRINT_AUTOTUNING=1 \
-    "$IMAGE" "$@" >/dev/null 9>&-
+    "$image" "$@" >/dev/null 9>&-
   echo "started llm-$name"
 }
 
@@ -421,12 +423,15 @@ check_fits() {
   awk -v name="$name" -v share="$share" -v used="$used" -v budget="$MEMORY_BUDGET" \
       -v total="$(gpu_bytes)" -v weights="$(weights_bytes "$repo")" -v room="$WORKING_ROOM_GB" \
       -v kv="$(python3 "$HERE/model_catalog.py" kv-bytes "$repo")" \
+      -v measured="$(python3 "$HERE/model_catalog.py" memory-bytes "${name%-copy}")" \
       -v vram="${vram:-0}" -v free="$free" '
     BEGIN {
       gb = 1024 ^ 3
       # The room holds a small KV cache. A full-context request needs kv, plus
       # 1.5 GB that every start on 2026-11-16 used beyond weights and cache.
       need = weights + (kv + 1.5 * gb > room * gb ? kv + 1.5 * gb : room * gb)
+      # llama.cpp models take what they take; the catalog holds that measurement.
+      if (measured > 0) need = measured
       if (share * total < need) {
         printf "%s does not fit: it needs about %.0f GB, its %.2f share is %.0f of %.0f GB\n",
           name, need / gb, share, share * total / gb, total / gb
@@ -494,6 +499,20 @@ up() {
     python3 "$HERE/model_catalog.py" check-flags "$name" $(field "$model" 5) ${LOCAL_LLM_EXTRA_FLAGS:-} || { failed=1; continue; }
     [[ $name == *-copy ]] || want "$name"
     checkpoint=$(field "$model" 4)
+    if [[ $(field "$model" 6) == llama.cpp ]]; then
+      # No build context: the Containerfile fetches its pinned sources itself.
+      podman image exists "$(field "$model" 7)" ||
+        podman build -t "$(field "$model" 7)" - <"$HERE/Containerfile.llama-cpp" || { failed=1; continue; }
+      # llama.cpp takes what the model needs rather than a share; the share
+      # only books its place in the memory budget.
+      # shellcheck disable=SC2046  # both columns are meant to split into words
+      run_container "$name" llama-server \
+        $(python3 "$HERE/model_catalog.py" serve-args "${name%-copy}") \
+        --alias "$name" --host 127.0.0.1 --port "$port" \
+        $(field "$model" 5) ${LOCAL_LLM_EXTRA_FLAGS:-}
+      wait_until_ready "$name" "$port" || failed=1
+      continue
+    fi
     if python3 "$HERE/model_catalog.py" contains "$name"; then
       checkpoint=$(python3 "$HERE/model_catalog.py" serve-path "$(field "$model" 4)") || { failed=1; continue; }
     fi
