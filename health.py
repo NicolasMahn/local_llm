@@ -34,6 +34,8 @@ LLAMA_CPP_LOADED = "server_run_i: model loaded"
 KILLED = "killed (SIGKILL), most likely for lack of memory; journalctl -k shows it"
 LLAMA_CPP_ERROR = re.compile(r"^\S+ E (?:\w+\s+)?(\w+: .*)$", re.M)
 LLAMA_CPP_INFO = re.compile(r"^\S+ I .*$", re.M)
+LLAMA_CPP_ERROR_LINE = re.compile(r"^\S+ E (.*)$", re.M)
+REQUEST_ERROR = re.compile(r"\b(?:send_error|got exception):")
 # ggml's abort, written straight to stderr; it can be the only line a GPU
 # fault leaves, because llama.cpp's own log is written by a thread that dies
 # with the process.
@@ -353,24 +355,26 @@ class Containers:
 
     @staticmethod
     def llama_cpp_reason(log, exit_code):
-        """While loading, the first error is the cause. While serving, llama.cpp
-        also logs failed requests as errors, and goes on logging after them;
-        a crash is what ends the log, after its last ordinary line. A silent
-        kill outranks it."""
-        loading, _, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
+        """While loading, the first error is the cause. Otherwise a crash is
+        what ends the log, after its last ordinary line; failed requests are
+        logged as errors too and never count. A silent kill outranks it."""
+        loading, loaded, serving = log.rsplit(LLAMA_CPP_START, 1)[-1].partition(LLAMA_CPP_LOADED)
         if first := LLAMA_CPP_ERROR.search(loading):
             return first.group(1)[:160]
         if exit_code == 137:
             return KILLED
-        ordinary = list(LLAMA_CPP_INFO.finditer(serving))
-        serving = serving[ordinary[-1].end():] if ordinary else serving
-        if abort := GGML_ABORT.findall(serving):
+        tail = serving if loaded else loading
+        ordinary = list(LLAMA_CPP_INFO.finditer(tail))
+        tail = tail[ordinary[-1].end():] if ordinary else tail
+        errors = [line for line in LLAMA_CPP_ERROR_LINE.findall(tail) if not REQUEST_ERROR.search(line)]
+        if abort := GGML_ABORT.findall(tail):
             place, message = abort[-1]
-            return f"{message} ({place})"[:160]
-        if crash := LLAMA_CPP_ERROR.findall(serving):
-            return crash[-1][:160]
+            # The abort only names the kind of error; its logged line says which.
+            detail = next((line[line.index(message):] for line in errors if message in line), message)
+            return f"{detail} ({place})"[:160]
+        if errors:
+            return errors[0][:160]
         return f"exit code {exit_code}, see ./llm logs"
-
 
 class Health:
     def __init__(self, state_dir):

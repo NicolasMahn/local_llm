@@ -222,14 +222,27 @@ def test_a_kill_while_serving_is_not_blamed_on_an_earlier_failed_request(monkeyp
 
 
 def test_a_gpu_fault_while_serving_shows_its_error(monkeypatch):
+    # ggml_cuda_error logs three lines, then aborts naming only the kind of error.
+    served = ("0.00.039.939 I srv  llama_server: initializing ...\n"
+              "0.10.700.413 I srv  server_run_i: model loaded\n"
+              "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n")
+    logged = ("0.30.000.000 E ROCm error: out of memory\n"
+              "0.30.000.001 E   current device: 0, in function alloc at /src/ggml/src/ggml-cuda/ggml-cuda.cu:420\n"
+              "0.30.000.002 E   hipMalloc(&ptr, size)\n")
+    abort = "/src/ggml/src/ggml-cuda/ggml-cuda.cu:94: ROCm error\n"
+    assert container_reason(monkeypatch, served + logged + abort, 134) == "ROCm error: out of memory (ggml-cuda.cu:94)"
+    # The log thread can die before it writes its lines.
+    assert container_reason(monkeypatch, served + abort, 134) == "ROCm error (ggml-cuda.cu:94)"
+    assert container_reason(monkeypatch, served + logged, 134) == "ROCm error: out of memory"
+    # A segfault right after a failed request leaves nothing of its own.
+    assert container_reason(monkeypatch, served, 139) == "exit code 139, see ./llm logs"
+
+
+def test_an_assert_while_loading_shows_its_place(monkeypatch):
     log = ("0.00.039.939 I srv  llama_server: initializing ...\n"
-           "0.10.700.413 I srv  server_run_i: model loaded\n"
-           "0.20.000.000 E srv  send_error: task id = 7, error: request exceeds the available context size\n"
-           "0.30.000.000 E ggml_cuda_error: ROCm error: unspecified launch failure\n")
-    assert container_reason(monkeypatch, log, exit_code=134) == "ggml_cuda_error: ROCm error: unspecified launch failure"
-    # The abort can be all that reaches the log.
-    aborted = log.rsplit("0.30", 1)[0] + "/src/ggml/src/ggml-cuda/ggml-cuda.cu:114: ROCm error\n"
-    assert container_reason(monkeypatch, aborted, exit_code=134) == "ROCm error (ggml-cuda.cu:114)"
+           "0.00.050.000 I srv    load_model: loading model '/model/x.gguf'\n"
+           "/src/ggml/src/ggml-cuda/inkling2.cu:412: GGML_ASSERT(n > 0) failed\n")
+    assert container_reason(monkeypatch, log, 134) == "GGML_ASSERT(n > 0) failed (inkling2.cu:412)"
 
 
 def test_a_crash_that_logs_no_error_is_not_blamed_on_an_earlier_failed_request(monkeypatch):
